@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
+*.egg-info/
+
+# Data & models (large; keep out of git — use HF Hub / DVC instead)
+data/
+datasets/
+outputs/
+checkpoints/
+*.ckpt
+*.safetensors
+wandb/
+
+# ROS 2 build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Isaac / sim caches
+*.usd.bak
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.venv-v05
+.venv-044

@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!--
+    Eye-in-hand (wrist) camera for the UR5e (camera C2 in docs/camera_setup.md).
+
+    The fixed transform below is the sim<->real PARITY CONTRACT (decision D7): it MUST
+    match the measured camera->flange extrinsic from hand-eye calibration (easy_handeye2).
+    The placeholder xyz/rpy assumes the camera mounted above/behind the AmazingHand,
+    looking down the approach axis — REPLACE after calibration.
+
+    Usage in a robot xacro:
+      <xacro:include filename="$(find ur5e_amazinghand_bringup)/urdf/wrist_camera.xacro"/>
+      <xacro:wrist_camera parent="tool0"/>
+  -->
+  <xacro:macro name="wrist_camera"
+               params="parent:=tool0 name:=wrist_cam width:=640 height:=480 fps:=30 hfov:=1.2">
+
+    <link name="${name}_link">
+      <visual>
+        <geometry><box size="0.025 0.090 0.025"/></geometry>
+      </visual>
+    </link>
+
+    <!-- PLACEHOLDER extrinsic — MEASURE ME via hand-eye calibration. -->
+    <joint name="${name}_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}_link"/>
+      <origin xyz="0.0 -0.05 0.05" rpy="0 0.6 -1.5708"/>
+    </joint>
+
+    <!-- Optical frame per REP-103 (z forward, x right, y down). -->
+    <link name="${name}_optical_frame"/>
+    <joint name="${name}_optical_joint" type="fixed">
+      <parent link="${name}_link"/>
+      <child link="${name}_optical_frame"/>
+      <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708"/>
+    </joint>
+
+    <!-- Gazebo (Harmonic) camera sensor; bridge ${name}/image to ROS via ros_gz_bridge. -->
+    <gazebo reference="${name}_link">
+      <sensor name="${name}" type="camera">
+        <update_rate>${fps}</update_rate>
+        <topic>${name}/image</topic>
+        <camera>
+          <horizontal_fov>${hfov}</horizontal_fov>
+          <image><width>${width}</width><height>${height}</height></image>
+          <clip><near>0.02</near><far>10.0</far></clip>
+        </camera>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+</robot>
