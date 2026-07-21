@@ -97,6 +97,14 @@ HF_HUB_OFFLINE=1 .venv/bin/python -m lerobot.scripts.lerobot_train \
   --steps=50000 --batch_size=16 --num_workers=24 --eval_freq=0 \
   --output_dir=outputs/train/<run> --wandb.enable=false
 
+# Fine-tune SmolVLA from the pretrained base instead (needs internet + transformers; more sample-efficient
+# than ACT-from-scratch). Full recipe + deploy/version notes: docs/smolvla.md
+lerobot-train --policy.path=lerobot/smolvla_base \
+  --dataset.repo_id=local/<id> --dataset.root=outputs/datasets/<dir> \
+  --batch_size=64 --steps=20000 --policy.device=cuda --policy.push_to_hub=false \
+  --output_dir=outputs/train/<run>_smolvla --wandb.enable=false
+# eval_hw.py auto-detects act vs smolvla from the checkpoint config — same deploy command.
+
 # Roll out a policy in sim, score pick-place (+ --video):
 PYTHONPATH=. HF_HUB_OFFLINE=1 .venv/bin/python scripts/eval_policy.py \
   --ckpt outputs/train/<run>/checkpoints/last/pretrained_model --episodes 10 --steps 400 --device cuda [--randomize] [--video]

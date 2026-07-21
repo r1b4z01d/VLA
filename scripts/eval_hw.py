@@ -1,6 +1,7 @@
-"""Deploy a trained policy on the REAL hardware — the policy drives the UR5e + AmazingHand from live
-camera + proprioceptive observations. **MOTION-PRODUCING; keep the e-stop in hand.** Runs on the
-robot PC (that's where the cameras + RTDE + hand live).
+"""Deploy a trained policy (ACT or SmolVLA) on the REAL hardware — the policy drives the UR5e +
+AmazingHand from live camera + proprioceptive observations. The policy class is auto-detected from the
+checkpoint's config.json. **MOTION-PRODUCING; keep the e-stop in hand.** Runs on the robot PC (that's
+where the cameras + RTDE + hand live).
 
     ~/VLA/run.sh scripts/eval_hw.py --ckpt outputs/train/<run>/checkpoints/last/pretrained_model \
         --fps 12 [--video]
@@ -20,20 +21,25 @@ hardware — watch it and judge; `--video` records the scene feed for review. Sa
 no-go + `max_step` + IK-reachability clamps stay active, so the arm ramps toward targets and can't jump.
 
 Notes:
-- `--device cpu` by default (the robot PC has no CUDA). ACT is small; CPU inference keeps up at 12 fps.
-- Train on the GPU box's 0.4.4 `.venv` (matches the robot PC's lerobot 0.4.4) so the checkpoint loads
-  here without a config/version mismatch.
+- `--device cpu` by default (the robot PC has no CUDA). ACT (~52M) keeps up at 12 fps on CPU. **SmolVLA
+  (~450M) will NOT** — expect ~seconds/inference on CPU. Measure `infer_ms` in the log; if it can't hold
+  the rate, either run inference on a GPU host (remote-inference bridge, TODO) or accept a low query rate
+  (raise `--n-action-steps` so a chunk executes between the slow model calls).
+- Policy class auto-detected from config.json. ACT loads on lerobot 0.4.4; **SmolVLA needs the SmolVLA
+  policy + `transformers` in the eval env** — confirm the robot PC's lerobot ships it before deploying.
 - Offline box: seed `~/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth` once (the ACT backbone
   fetches ImageNet weights on build); `run.sh` sets `HF_HUB_OFFLINE=1`. Trained weights overwrite it.
 - `--steps N` (optional) auto-pauses after N *played* steps as a safety cap; default 0 = unlimited.
-- Reactivity: the checkpoint runs `n_action_steps == chunk_size` (fully OPEN-LOOP — one observation
-  then 100 blind actions). `--temporal-ensemble 0.01` (re-observe every step) or `--n-action-steps 8`
-  makes it closed-loop WITHOUT retraining — usually the difference between 0% and something.
+- Reactivity: both ACT (chunk 100) and SmolVLA (chunk 50) default to executing the whole chunk (fully
+  OPEN-LOOP). `--n-action-steps 8` (both) or `--temporal-ensemble 0.01` (ACT-only) makes it closed-loop
+  WITHOUT retraining.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import queue
 import time
 
@@ -41,7 +47,6 @@ import cv2
 import numpy as np
 import torch
 
-from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 from ur5e_lerobot.schema import ACTION_NAMES, STATE_NAMES
@@ -93,31 +98,51 @@ def _connect_with_hand_power(robot, robot_ip: str, voltage: int) -> None:
         robot.connect()
 
 
-def _set_reactivity(policy, n_action_steps, temporal_ensemble) -> None:
-    """Override ACT's action-chunk *execution* horizon at inference — NO retraining. The net always
-    predicts `chunk_size` actions; this only controls how many are executed before re-observing.
-    Lower = re-observe more often = more reactive/closed-loop. `temporal_ensemble` (a coeff, e.g. 0.01)
-    forces n_action_steps=1 and blends overlapping chunk predictions every step (ALOHA-style) — most
-    reactive. The checkpoint default (n_action_steps == chunk_size) is FULLY OPEN-LOOP."""
+def _load_policy(ckpt: str, device: str):
+    """Load whichever policy the checkpoint holds — ACT or SmolVLA — dispatching on config.json 'type'.
+    (SmolVLA needs `transformers` in the eval env for its SmolVLM backbone; the robot PC has it.)"""
+    ptype = json.load(open(os.path.join(ckpt, "config.json"))).get("type")
+    if ptype == "act":
+        from lerobot.policies.act.modeling_act import ACTPolicy as Cls
+    elif ptype == "smolvla":
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy as Cls
+    else:
+        raise SystemExit(f"eval_hw: unsupported policy type {ptype!r} (expected 'act' or 'smolvla')")
+    policy = Cls.from_pretrained(ckpt)
+    policy.eval()
+    policy.to(device)
+    return policy, ptype
+
+
+def _set_reactivity(policy, ptype, n_action_steps, temporal_ensemble) -> None:
+    """Override the policy's action-chunk *execution* horizon at inference — NO retraining. Both ACT and
+    SmolVLA predict `chunk_size` actions and default to executing all of them (fully OPEN-LOOP); this
+    controls how many run before re-observing. Lower = more reactive. `temporal_ensemble` (a coeff, e.g.
+    0.01) is ACT-only: forces n_action_steps=1 and blends overlapping chunk predictions every step."""
     cfg = policy.config
     if temporal_ensemble is not None:
-        from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
+        if ptype != "act":
+            print(f"[reactivity] --temporal-ensemble is ACT-only; ignoring for {ptype}")
+        else:
+            from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
 
-        cfg.temporal_ensemble_coeff = temporal_ensemble
-        cfg.n_action_steps = 1
-        policy.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble, cfg.chunk_size)
-        print(f"[reactivity] temporal ensemble coeff={temporal_ensemble}, n_action_steps=1 "
-              f"(re-observe every step — most reactive)")
-    elif n_action_steps is not None:
-        cfg.temporal_ensemble_coeff = None
+            cfg.temporal_ensemble_coeff = temporal_ensemble
+            cfg.n_action_steps = 1
+            policy.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble, cfg.chunk_size)
+            print(f"[reactivity] temporal ensemble coeff={temporal_ensemble}, n_action_steps=1 "
+                  f"(re-observe every step — most reactive)")
+            return
+    if n_action_steps is not None:
+        if getattr(cfg, "temporal_ensemble_coeff", None) is not None:
+            cfg.temporal_ensemble_coeff = None
         cfg.n_action_steps = n_action_steps
         print(f"[reactivity] n_action_steps={n_action_steps} of chunk_size={cfg.chunk_size} "
               f"(re-observe every {n_action_steps} steps)")
     else:
         openloop = cfg.n_action_steps and cfg.n_action_steps >= cfg.chunk_size
-        print(f"[reactivity] checkpoint default n_action_steps={cfg.n_action_steps}, "
+        print(f"[reactivity] {ptype} default n_action_steps={cfg.n_action_steps}, "
               f"chunk_size={cfg.chunk_size}"
-              + ("  ** FULLY OPEN-LOOP — try --temporal-ensemble 0.01 **" if openloop else ""))
+              + ("  ** FULLY OPEN-LOOP — try --n-action-steps 8 **" if openloop else ""))
 
 
 def _make_control(evq: "queue.Queue"):
@@ -188,22 +213,21 @@ def main() -> None:
     ap.add_argument("--video", action="store_true", help="record the played rollout (scene) to an MP4")
     ap.add_argument("--video-out", default="outputs/eval_hw.mp4")
     ap.add_argument("--n-action-steps", type=int, default=None,
-                    help="override ACT execution horizon (checkpoint=100 == fully open-loop; try 8-16 "
-                         "for closed-loop). Lower = re-observe more often = more reactive.")
+                    help="override the action-chunk execution horizon (ACT chunk=100, SmolVLA=50; both "
+                         "fully open-loop by default). Try 8-16 for closed-loop; lower = more reactive.")
     ap.add_argument("--temporal-ensemble", type=float, default=None, metavar="COEFF",
-                    help="enable ACT temporal ensembling (e.g. 0.01); forces n_action_steps=1 (re-observe "
-                         "every step, most reactive). Takes precedence over --n-action-steps.")
+                    help="ACT-only: temporal ensembling (e.g. 0.01); forces n_action_steps=1 (re-observe "
+                         "every step). Takes precedence over --n-action-steps; ignored for SmolVLA.")
     ap.add_argument("--log-csv", default="outputs/eval_hw_log.csv",
                     help="per-step diagnostics CSV (pose deltas, clamp, loop/inference timing)")
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
     args = ap.parse_args()
 
-    policy = ACTPolicy.from_pretrained(args.ckpt)
-    policy.eval()
-    policy.to(args.device)
+    policy, ptype = _load_policy(args.ckpt, args.device)
+    print(f"[policy] loaded {ptype} on {args.device}")
     pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
                                          preprocessor_overrides={"device_processor": {"device": args.device}})
-    _set_reactivity(policy, args.n_action_steps, args.temporal_ensemble)
+    _set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
     policy.reset()
 
     robot, scene_fn, wrist_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
