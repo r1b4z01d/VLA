@@ -8,13 +8,13 @@ Wire format: 4-byte big-endian length prefix + a pickled dict of PLAIN Python ty
 bytes) so it is portable across differing numpy/torch versions. Images are JPEG-compressed. **Trusted
 LAN only** — pickle is not safe against a hostile peer.
 
-Topology: the GPU box (192.168.1.x) and robot PC (192.168.11.x) are on different subnets bridged by the
-Mac. Relay the server port through the Mac with an SSH forward, e.g. on the Mac:
+Topology (simplest): put the GPU box and the robot PC on the SAME subnet — the client then connects
+straight to the server, `eval_hw.py --remote <GPU_IP>:8777` (the server binds 0.0.0.0; just open the
+port in the GPU's firewall). Keep the GPU box dual-homed if it also needs internet for training.
 
+Fallback, if they must stay on different subnets bridged by the Mac: relay the port through the Mac —
     ssh -N -L 0.0.0.0:8777:localhost:8777 gpu      # needs `GatewayPorts yes` in the Mac's sshd_config
-
-then point the client at the Mac:  eval_hw.py --remote <MAC_IP>:8777
-(If the client and server can reach each other directly, skip the relay and use the server host.)
+and point the client at <MAC_IP>:8777.
 """
 from __future__ import annotations
 

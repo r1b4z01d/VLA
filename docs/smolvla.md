@@ -36,23 +36,24 @@ So inference runs on the **GPU box** and only observations/actions cross the wir
 `ur5e_lerobot/remote.py` (framed-pickle TCP protocol + client) · `scripts/infer_server.py` (GPU server) ·
 `eval_hw.py --remote HOST:PORT` (robot-PC client — no policy/checkpoint/deps needed locally in this mode).
 
-`.80` and the GPU box are on different subnets, so relay the server port through the Mac:
+**Put the GPU box on the robot's subnet** (keep it dual-homed so it still has internet for training). Then
+`.80` connects straight to the GPU — no Mac relay, no tunnel:
 ```bash
-# 1) GPU box: serve the policy (reactivity is set HERE, server-side)
+# 1) GPU box: serve the policy (reactivity is set HERE, server-side; open port 8777 in the firewall)
 .venv/bin/python scripts/infer_server.py \
   --ckpt outputs/train/hw_pickplace_smolvla/checkpoints/last/pretrained_model \
   --device cuda --port 8777 --n-action-steps 8
 
-# 2) Mac (relay): expose the GPU's port to the robot subnet (needs `GatewayPorts yes` in sshd_config)
-ssh -N -L 0.0.0.0:8777:localhost:8777 gpu
-
-# 3) robot PC .80: run the eval client pointed at the Mac (e-stop in hand)
-~/VLA/run.sh scripts/eval_hw.py --remote <MAC_IP>:8777 --task "pick up the Home Depot bucket" --fps 12 --video
+# 2) robot PC .80: run the eval client straight at the GPU (e-stop in hand)
+~/VLA/run.sh scripts/eval_hw.py --remote <GPU_IP>:8777 --task "pick up the Home Depot bucket" --fps 12 --video
 ```
-The action-chunk design tolerates a low query rate, so the Mac→VPN hop latency is acceptable. On the GPU
-SmolVLA is ~tens of ms, so `--n-action-steps` can be small (reactive). Validated offline with a mock server
-(protocol/client round-trip + reset); the live path needs the GPU box + `.80` on the network to confirm.
-(Permanent fix: a GPU in the robot PC — then drop `--remote` and run local.)
+On the GPU SmolVLA is ~tens of ms, so `--n-action-steps` can be small (reactive); the action-chunk design
+also absorbs network latency. Validated offline with a mock server (protocol/client round-trip + reset);
+the live path needs both machines on the network to confirm.
+
+_Fallback — if they must stay on different subnets:_ relay through the Mac with
+`ssh -N -L 0.0.0.0:8777:localhost:8777 gpu` (needs `GatewayPorts yes`) and point the client at `<MAC_IP>:8777`.
+_Permanent fix:_ a GPU in the robot PC — then drop `--remote` and run local.
 
 ## OPEN DECISION — lerobot version alignment (verify when the machines are back)
 SmolVLA requires the `smolvla` policy + `transformers`. **The pinned `.venv` on both the GPU box and `.80`

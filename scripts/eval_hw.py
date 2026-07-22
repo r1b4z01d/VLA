@@ -205,7 +205,8 @@ def main() -> None:
     ap.add_argument("--remote", metavar="HOST:PORT",
                     help="run inference on a remote GPU server (scripts/infer_server.py) instead of loading "
                          "the policy here — for SmolVLA, which is too slow on the robot PC CPU. Reactivity "
-                         "is configured on the server. e.g. --remote 192.168.11.238:8777")
+                         "is configured on the server. e.g. --remote <GPU_IP>:8777 (same subnet), or the "
+                         "Mac relay IP if bridging subnets")
     ap.add_argument("--steps", type=int, default=0, help="auto-pause after N played steps (0 = unlimited)")
     ap.add_argument("--fps", type=int, default=12, help="control rate; match the training data")
     ap.add_argument("--device", default="cpu")
