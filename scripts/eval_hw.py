@@ -22,11 +22,11 @@ no-go + `max_step` + IK-reachability clamps stay active, so the arm ramps toward
 
 Notes:
 - `--device cpu` by default (the robot PC has no CUDA). ACT (~52M) keeps up at 12 fps on CPU. **SmolVLA
-  (~450M) will NOT** — expect ~seconds/inference on CPU. Measure `infer_ms` in the log; if it can't hold
-  the rate, either run inference on a GPU host (remote-inference bridge, TODO) or accept a low query rate
-  (raise `--n-action-steps` so a chunk executes between the slow model calls).
-- Policy class auto-detected from config.json. ACT loads on lerobot 0.4.4; **SmolVLA needs the SmolVLA
-  policy + `transformers` in the eval env** — confirm the robot PC's lerobot ships it before deploying.
+  (~450M) is ~2.6 s/inference on this CPU (measured) — unusable for real-time.** Run it via `--remote
+  HOST:PORT` (inference on the GPU box, see scripts/infer_server.py + ur5e_lerobot/remote.py); in remote
+  mode no policy/checkpoint/deps are needed here. Local SmolVLA only works at a very low query rate.
+- Policy class auto-detected from config.json. ACT loads on lerobot 0.4.4; SmolVLA also needs
+  `transformers` + `num2words` + the SmolVLM2 HF cache in the eval env (only relevant for LOCAL inference).
 - Offline box: seed `~/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth` once (the ACT backbone
   fetches ImageNet weights on build); `run.sh` sets `HF_HUB_OFFLINE=1`. Trained weights overwrite it.
 - `--steps N` (optional) auto-pauses after N *played* steps as a safety cap; default 0 = unlimited.
@@ -201,7 +201,11 @@ def _rotvec_angle_deg(a, b) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Roll out a trained policy on the real UR5e + AmazingHand.")
-    ap.add_argument("--ckpt", required=True, help="path to .../checkpoints/last/pretrained_model")
+    ap.add_argument("--ckpt", help="path to .../checkpoints/last/pretrained_model (local inference)")
+    ap.add_argument("--remote", metavar="HOST:PORT",
+                    help="run inference on a remote GPU server (scripts/infer_server.py) instead of loading "
+                         "the policy here — for SmolVLA, which is too slow on the robot PC CPU. Reactivity "
+                         "is configured on the server. e.g. --remote 192.168.11.238:8777")
     ap.add_argument("--steps", type=int, default=0, help="auto-pause after N played steps (0 = unlimited)")
     ap.add_argument("--fps", type=int, default=12, help="control rate; match the training data")
     ap.add_argument("--device", default="cpu")
@@ -223,12 +227,23 @@ def main() -> None:
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
     args = ap.parse_args()
 
-    policy, ptype = _load_policy(args.ckpt, args.device)
-    print(f"[policy] loaded {ptype} on {args.device}")
-    pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
-                                         preprocessor_overrides={"device_processor": {"device": args.device}})
-    _set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
-    policy.reset()
+    remote_client = None
+    policy = pre = post = None
+    if args.remote:
+        from ur5e_lerobot.remote import RemotePolicyClient
+
+        host, _, port = args.remote.partition(":")
+        remote_client = RemotePolicyClient(host, int(port or 8777)).connect()
+        print(f"[policy] REMOTE inference @ {args.remote} — reactivity is configured on the server")
+    else:
+        if not args.ckpt:
+            ap.error("--ckpt is required for local inference (or use --remote HOST:PORT)")
+        policy, ptype = _load_policy(args.ckpt, args.device)
+        print(f"[policy] loaded {ptype} on {args.device}")
+        pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
+                                             preprocessor_overrides={"device_processor": {"device": args.device}})
+        _set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
+        policy.reset()
 
     robot, scene_fn, wrist_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
     _connect_with_hand_power(robot, args.robot_ip, args.tool_voltage)
@@ -237,15 +252,28 @@ def main() -> None:
     def chw(img):  # RGB HWC uint8 -> [1,3,H,W] float in [0,1] (preprocessor handles the rest)
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float().div(255)[None]
 
-    def observe():
+    def observe():  # raw pieces, consumed by either the local or remote infer()
         o = robot.get_observation()
         state = np.array([o[n] for n in STATE_NAMES], dtype=np.float32)
-        scene = scene_fn(640, 480)
-        obs = {"observation.state": torch.from_numpy(state)[None],
-               "observation.images.scene": chw(cv2.resize(scene, (W, H))),
-               "observation.images.wrist": chw(cv2.resize(wrist_fn(640, 480), (W, H))),
-               "task": [args.task]}
-        return obs, scene, state
+        return state, scene_fn(640, 480), wrist_fn(640, 480)
+
+    if remote_client is not None:
+        def infer(state, scene, wrist):  # ship the obs to the GPU server, get one action back
+            return remote_client.infer(state, cv2.resize(scene, (W, H)), cv2.resize(wrist, (W, H)), args.task)
+
+        def reset_policy():
+            remote_client.reset()
+    else:
+        def infer(state, scene, wrist):
+            obs = {"observation.state": torch.from_numpy(state)[None],
+                   "observation.images.scene": chw(cv2.resize(scene, (W, H))),
+                   "observation.images.wrist": chw(cv2.resize(wrist, (W, H))),
+                   "task": [args.task]}
+            with torch.no_grad():
+                return post(policy.select_action(pre(obs)))[0].cpu().numpy()
+
+        def reset_policy():
+            policy.reset()
 
     writer = None
     if args.video:
@@ -270,7 +298,7 @@ def main() -> None:
     def enter_playing() -> None:
         if st["mode"] == "freedrive":
             stop_freedrive()
-        policy.reset()          # fresh chunk: re-observe from wherever the arm is now
+        reset_policy()          # fresh chunk: re-observe from wherever the arm is now
         st["played"] = 0
         set_mode("playing")
 
@@ -292,7 +320,7 @@ def main() -> None:
         start clean — then FREEDRIVE to reposition and PLAY again."""
         if st["mode"] == "freedrive":
             stop_freedrive()
-        policy.reset()
+        reset_policy()
         st["played"] = 0
         set_mode("paused")
         print("[reset] policy reset — paused")
@@ -330,10 +358,9 @@ def main() -> None:
 
             if st["mode"] == "playing":
                 t0 = time.time()
-                obs, scene, state = observe()
+                state, scene, wrist = observe()
                 t_obs = time.time()
-                with torch.no_grad():
-                    act = post(policy.select_action(pre(obs)))[0].cpu().numpy()
+                act = infer(state, scene, wrist)
                 t_inf = time.time()
                 robot.send_action(dict(zip(ACTION_NAMES, act)))
                 t_snd = time.time()
@@ -379,6 +406,8 @@ def main() -> None:
             pass
         if pad is not None:
             pad.close()
+        if remote_client is not None:
+            remote_client.close()
         if writer is not None:
             writer.release()
             print(f"wrote {args.video_out}")

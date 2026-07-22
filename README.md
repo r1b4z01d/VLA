@@ -179,8 +179,9 @@ rsync -az --exclude=__pycache__ --exclude='._*' ur5e_lerobot/ scripts/ assets/ g
 ```
 
 ## Layout
-- `scripts/` — setup, eval, merge, sim-grasp diagnostics; `hw_preflight.py` (staged hardware bring-up: arm/hand/cameras/move).
+- `scripts/` — setup, eval, merge, sim-grasp diagnostics; `hw_preflight.py` (staged hardware bring-up); `eval_hw.py` (deploy ACT|SmolVLA, local or `--remote`); `infer_server.py` (GPU-side remote-inference server for SmolVLA).
 - `ur5e_lerobot/` — integration package.
+  - `remote.py` — remote-inference bridge (framed-pickle TCP): `RemotePolicyClient` + `serve()`, so SmolVLA runs on the GPU box and streams actions to the robot PC ✅
   - `schema.py` — action/obs contract: **v1 10-D / 16-D state** (live) + **v2 14-D / 20-D** (8-DOF hand, opt-in) ✅
   - `hand/amazing_hand_client.py` — TCP client for the AmazingHand ESP32 (`.117:8765`): curls + flex/abduct + `read_state` ✅
   - `robot/` — LeRobot adapter `URAmazingHand`; `rtde_arm.py` (RTDE teleop: servoL + no-go/max_step/max_rot_step/z-floor/IK guard + freedrive + reconnect); `workspace.py` (no-go zone incl. elbow/wrist-link FK check, body at +y); `arm_interface.py` `Ros2ArmInterface` (stub) ✅

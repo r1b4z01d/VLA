@@ -30,15 +30,29 @@ lerobot-train \
   from scratch). Drop `batch_size` if the 4090 OOMs; SmolVLA is designed to fine-tune on modest VRAM.
 - SmolVLA fine-tunes fast (~20k steps is plenty for a single task); with more demos, scale steps.
 
-## Deploy / eval (robot PC `.80`, CPU-only) — the hard constraint
-`eval_hw.py` loads the SmolVLA checkpoint the same way (`--ckpt .../pretrained_model`). **But `.80` has no
-GPU**, and SmolVLA (~450M) on CPU is ~**seconds per inference**, not the ~1 ms ACT enjoyed. So:
-- Watch `infer_ms` in `outputs/eval_hw_log.csv`. It will not hold 12 fps on CPU.
-- Short-term: raise `--n-action-steps` so one slow model call feeds many executed steps (open-loop-ish
-  between calls) — trades reactivity for feasibility.
-- Proper fix (TODO): **remote inference** — run SmolVLA on the GPU box, stream actions to `.80`
-  (latest-wins UDP; SAFE-STALL on stale packets). The action-chunk design tolerates a low query rate,
-  so cross-subnet latency may be acceptable. Or put a GPU in the robot PC.
+## Deploy / eval — remote inference (robot PC `.80` has no GPU)
+**Measured:** SmolVLA is **~2.6 s/inference on `.80`'s CPU** (vs ~1 ms for ACT) — unusable for real-time.
+So inference runs on the **GPU box** and only observations/actions cross the wire. Bridge:
+`ur5e_lerobot/remote.py` (framed-pickle TCP protocol + client) · `scripts/infer_server.py` (GPU server) ·
+`eval_hw.py --remote HOST:PORT` (robot-PC client — no policy/checkpoint/deps needed locally in this mode).
+
+`.80` and the GPU box are on different subnets, so relay the server port through the Mac:
+```bash
+# 1) GPU box: serve the policy (reactivity is set HERE, server-side)
+.venv/bin/python scripts/infer_server.py \
+  --ckpt outputs/train/hw_pickplace_smolvla/checkpoints/last/pretrained_model \
+  --device cuda --port 8777 --n-action-steps 8
+
+# 2) Mac (relay): expose the GPU's port to the robot subnet (needs `GatewayPorts yes` in sshd_config)
+ssh -N -L 0.0.0.0:8777:localhost:8777 gpu
+
+# 3) robot PC .80: run the eval client pointed at the Mac (e-stop in hand)
+~/VLA/run.sh scripts/eval_hw.py --remote <MAC_IP>:8777 --task "pick up the Home Depot bucket" --fps 12 --video
+```
+The action-chunk design tolerates a low query rate, so the Mac→VPN hop latency is acceptable. On the GPU
+SmolVLA is ~tens of ms, so `--n-action-steps` can be small (reactive). Validated offline with a mock server
+(protocol/client round-trip + reset); the live path needs the GPU box + `.80` on the network to confirm.
+(Permanent fix: a GPU in the robot PC — then drop `--remote` and run local.)
 
 ## OPEN DECISION — lerobot version alignment (verify when the machines are back)
 SmolVLA requires the `smolvla` policy + `transformers`. **The pinned `.venv` on both the GPU box and `.80`
