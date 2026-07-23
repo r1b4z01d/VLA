@@ -81,6 +81,10 @@ class RtdeArmInterface(ArmInterface):
 
     def start_freedrive(self) -> bool:
         """Enable gravity-comp freedrive so the arm can be hand-guided (kinesthetic teaching)."""
+        try:
+            self._c.servoStop()  # release any active servoL first, else teachMode can't take control
+        except Exception:        # noqa: BLE001 — no-op if nothing was servoing
+            pass                 # ("Another thread is already controlling the robot")
         self._c.teachMode()
         self._freedrive = True
         return True
@@ -89,6 +93,10 @@ class RtdeArmInterface(ArmInterface):
         if self._freedrive:
             self._c.endTeachMode()
             self._freedrive = False
+            try:
+                self._c.servoStop()  # clean control state before the next servoL resumes teleop
+            except Exception:        # noqa: BLE001
+                pass
 
     def home_step(self, q_home, max_dq: float = 0.03) -> bool:
         """servoJ ONE small step from the current joints toward q_home (rad) — call each control cycle
