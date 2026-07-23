@@ -226,6 +226,9 @@ def main() -> None:
     ap.add_argument("--log-csv", default="outputs/eval_hw_log.csv",
                     help="per-step diagnostics CSV (pose deltas, clamp, loop/inference timing)")
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
+    ap.add_argument("--ik-mode", choices=["servoL", "dls"], default="dls",
+                    help="arm IK: 'dls' (Python DLS+servoJ, singularity-robust — avoids the "
+                         "get_inverse_kin fault) or 'servoL' (proven Cartesian path, can fault near singularities)")
     args = ap.parse_args()
 
     remote_client = None
@@ -249,6 +252,9 @@ def main() -> None:
     robot, scene_fn, wrist_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
     _connect_with_hand_power(robot, args.robot_ip, args.tool_voltage)
     arm = getattr(robot, "arm", None)  # RtdeArmInterface — has start/stop_freedrive on hardware
+    if arm is not None and hasattr(arm, "ik_mode"):
+        arm.ik_mode = args.ik_mode  # policy eval defaults to 'dls' (singularity-robust); teleop stays servoL
+        print(f"[arm] ik_mode = {arm.ik_mode}")
 
     def chw(img):  # RGB HWC uint8 -> [1,3,H,W] float in [0,1] (preprocessor handles the rest)
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float().div(255)[None]
