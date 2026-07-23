@@ -57,6 +57,10 @@ controller). Hand over TCP (`hand/amazing_hand_client.py` → `.117`). Cameras b
 - **Grasp**: SpaceMouse buttons or keyboard `c`/`o`; gamepad bumpers LB/RB.
 - **● Start rec → demo → ■ Save ep**. Closing the window finalizes cleanly (parquet footers). Records both cameras + the 10-D action; **vary the block position** across episodes.
 
+**Stream Deck** (optional, `teleop/streamdeck.py`, mounted upside down → labels auto-flip): row 1 = record/save/discard/reconnect/quit, row 2 = open a finger (idx/mid/rng/thb + Open-All), row 3 = close a finger. ● REC blinks red while recording; ■ Save flashes green on save.
+
+![Data-capture Stream Deck layout](docs/streamdeck_capture.png)
+
 First hardware capture verified: **2 episodes / 900 frames**, both cameras, grasp exercised, `state ≠ action` (real servo lag) — genuine, learnable demos.
 
 **Replay / review a capture** — writes a montage (1 frame/episode) + a scene|wrist MP4. Headless
@@ -140,6 +144,8 @@ Three keys (a **keyboard fallback** maps the same letters if no deck is found):
   suspended). Pressing PLAY exits freedrive and starts.
 - **RESET** (`r`) — reset the policy's internal state and pause (arm holds). Abort a run and start clean.
 - **EXIT** (`x`) — stop + disconnect cleanly (Ctrl-C also aborts).
+
+![Policy-eval Stream Deck layout](docs/streamdeck_eval.png)
 
 **Run (e-stop in hand):** UR in **Remote Control** + brakes released; place the target as in the demos.
 ```bash
