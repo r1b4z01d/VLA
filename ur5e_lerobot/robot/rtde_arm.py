@@ -164,15 +164,16 @@ class RtdeArmInterface(ArmInterface):
                 target[3:6] = (_Rot.from_rotvec(_rel * (self.max_rot_step / _ang)) * _Rc).as_rotvec().tolist()
         if self.z_floor is not None and target[2] < self.z_floor:  # keep the TCP above the table
             target[2] = self.z_floor
-        # Skip targets with no IK solution near the current config, so an over-reaching teleop
-        # command can't fault the controller ("get_inverse_kin unable to find a solution").
+        # Solve IK ourselves, SEEDED at the current config, then servo in JOINT space. servoL would
+        # re-solve get_inverse_kin internally *unseeded* and fault ("the robot cannot reach the
+        # requested pose") on near-singular/boundary targets our seeded solve handles fine.
         try:
             sol = self._c.getInverseKinematics(target, self._r.getActualQ())
-        except Exception:  # noqa: BLE001 — ur_rtde raises when unreachable
+        except Exception:  # noqa: BLE001 — ur_rtde raises when no solution
             sol = None
         if not sol:
             return list(cur)  # unreachable — hold the current pose
         if links_in_nogo(sol):  # target config would fold an elbow/wrist LINK over the base -> hold
             return list(cur)
-        self._c.servoL(target, self.speed, self.accel, self.dt, self.lookahead, self.gain)
+        self._c.servoJ(sol, self.speed, self.accel, self.dt, self.lookahead, self.gain)  # NB joints, seeded
         return list(self._r.getActualTCPPose())
