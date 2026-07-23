@@ -18,7 +18,7 @@ import numpy as np
 
 from . import ur_kin
 from .arm_interface import ArmInterface
-from .workspace import clamp_out_of_nogo, links_in_nogo
+from .workspace import clamp_out_of_nogo
 
 DEFAULT_UR5E_IP = "192.168.11.21"
 
@@ -177,7 +177,9 @@ class RtdeArmInterface(ArmInterface):
         # each cycle, so nominal-vs-calibrated DH error is corrected, not accumulated.
         q_target = ur_kin.dls_ik_step(self._r.getActualQ(), cur, target,
                                       lam=self.ik_damping, dq_max=self.ik_dq_max)
-        if links_in_nogo(q_target):  # target config would fold an elbow/wrist LINK over the base -> hold
-            return list(cur)
+        # NB: no elbow/wrist link-no-go check here — the no-go rectangle contains the base origin where
+        # the arm's own elbow naturally sits, so it flagged every normal config and froze the arm. The
+        # TCP no-go clamp (above) still keeps the hand out of the body; a proper link guard would need a
+        # real body-volume model, not the TCP rectangle.
         self._c.servoJ(q_target, self.speed, self.accel, self.dt, self.lookahead, self.gain)
         return list(self._r.getActualTCPPose())
