@@ -66,6 +66,17 @@ def main() -> None:
         with torch.no_grad():
             return post(policy.select_action(pre(obs)))[0].cpu().numpy()
 
+    # Warm up so the FIRST client request isn't a ~100 s cold start (CUDA autotune + first VLM forward).
+    import time as _time
+    from ur5e_lerobot.schema import STATE_NAMES
+
+    print("[server] warming up (one dummy inference)…", flush=True)
+    _t = _time.time()
+    _dummy = np.zeros((H, W, 3), dtype=np.uint8)
+    infer(np.zeros(len(STATE_NAMES), dtype=np.float32), _dummy, _dummy, "warmup")
+    policy.reset()  # clear the queue so the first real request re-plans from the real observation
+    print(f"[server] warmup done in {_time.time() - _t:.1f}s — ready", flush=True)
+
     remote.serve(args.host, args.port, infer, reset_fn=policy.reset)
 
 
