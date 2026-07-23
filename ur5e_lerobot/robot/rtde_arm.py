@@ -90,6 +90,18 @@ class RtdeArmInterface(ArmInterface):
             self._c.endTeachMode()
             self._freedrive = False
 
+    def home_step(self, q_home, max_dq: float = 0.03) -> bool:
+        """servoJ ONE small step from the current joints toward q_home (rad) — call each control cycle
+        (hold-to-home). Joint space, so no IK/singularity faults and it's perfectly repeatable. Returns
+        True once within ~0.5° of home. `max_dq` caps per-cycle joint motion (speed)."""
+        if self._freedrive or self._c is None or self._r is None:
+            return False
+        q = np.asarray(self._r.getActualQ(), dtype=float)
+        qh = np.asarray(q_home, dtype=float)
+        dq = np.clip(qh - q, -max_dq, max_dq)
+        self._c.servoJ((q + dq).tolist(), self.speed, self.accel, self.dt, self.lookahead, self.gain)
+        return bool(np.all(np.abs(qh - q) < 0.009))
+
     def reconnect(self) -> str:
         """Recover after a protective stop / stopped control script (no app restart needed).
 

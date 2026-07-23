@@ -57,7 +57,9 @@ controller). Hand over TCP (`hand/amazing_hand_client.py` → `.117`). Cameras b
 - **Grasp**: SpaceMouse buttons or keyboard `c`/`o`; gamepad bumpers LB/RB.
 - **● Start rec → demo → ■ Save ep**. Closing the window finalizes cleanly (parquet footers). Records both cameras + the 10-D action; **vary the block position** across episodes.
 
-**Stream Deck** (optional, `teleop/streamdeck.py`, mounted upside down → labels auto-flip): row 1 = record/save/discard/reconnect/quit, row 2 = open a finger (idx/mid/rng/thb + Open-All), row 3 = close a finger. ● REC blinks red while recording; ■ Save flashes green on save.
+**Home pose:** freedrive to a comfortable start pose and click **🏠 Set Home** — it captures the joint config to `outputs/home_pose.json` (loaded on launch). The deck **Reset** key hold-returns to it (slow joint-space `servoJ`, singularity-safe).
+
+**Stream Deck** (optional, `teleop/streamdeck.py`, mounted upside down → labels auto-flip). Row 1 keys are **recording-state-dependent**: while recording, keys 2–3 are **■ Save / Discard**; between episodes they flip to **Reset** (hold → slow return to Home) and **Freedrive** (toggle teach mode to reposition). Rows 2–3 open/close a finger (idx/mid/rng/thb + Open-/Close-All). ● REC blinks red while recording; ■ Save flashes green on save.
 
 ![Data-capture Stream Deck layout](docs/streamdeck_capture.png)
 
