@@ -150,6 +150,22 @@ class RtdeArmInterface(ArmInterface):
     def is_connected(self) -> bool:
         return self._connected
 
+    def is_ready(self) -> bool:
+        """True if the arm can be servoed right now: not protective/emergency-stopped and the RTDE
+        control script is running. Cheap RTDE reads — call each control step to catch a mid-run fault
+        (a protective stop halts the control script, after which servoJ is a silent no-op)."""
+        try:
+            if self._r is not None and (self._r.isProtectiveStopped() or self._r.isEmergencyStopped()):
+                return False
+        except Exception:  # noqa: BLE001 — older ur_rtde may lack these; fall through to the script check
+            pass
+        try:
+            if self._c is not None and hasattr(self._c, "isProgramRunning") and not self._c.isProgramRunning():
+                return False
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def get_ee_pose(self) -> list[float]:
         return list(self._r.getActualTCPPose())  # [x,y,z, Rx,Ry,Rz] rotvec — matches the schema
 

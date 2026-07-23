@@ -364,6 +364,18 @@ def main() -> None:
                 break
 
             if st["mode"] == "playing":
+                # A protective stop / e-stop halts the UR control script -> servoJ becomes a silent
+                # no-op (the arm freezes while the loop spams "control script not running"). Detect it,
+                # PAUSE, and reconnect (clears the protective stop + reuploads the script) so the run
+                # recovers cleanly instead of driving blind into a dead controller.
+                if arm is not None and hasattr(arm, "is_ready") and not arm.is_ready():
+                    set_mode("paused")
+                    try:
+                        print(f"[fault] UR control stopped (protective/e-stop) — reconnecting: {arm.reconnect()}")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[fault] UR control stopped; reconnect failed: {e}")
+                    print("  paused. clear the e-stop if engaged, FREEDRIVE to a safe pose, then PLAY.")
+                    continue
                 t0 = time.time()
                 state, scene, wrist = observe()
                 t_obs = time.time()
