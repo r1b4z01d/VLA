@@ -1,0 +1,20 @@
+# One-command local run (native arch):  docker compose -f webui/docker-compose.yml up --build
+# Then browse http://localhost:8080  (datasets edited in ./outputs/datasets persist on the host).
+services:
+  webui:
+    build:
+      context: ..                 # repo root — the Dockerfile COPYs webui/
+      dockerfile: webui/Dockerfile
+    image: vla-webui:0.4.4
+    shm_size: "512mb"             # torch/DataLoader shm; the renderer uses --num-workers 0, this is insurance
+    ports:
+      - "8080:8080"               # web UI + the per-episode .rrd files the viewer fetches
+      - "9090:9090"               # rerun WASM viewer app — browser loads it, then pulls the .rrd from :8080
+    volumes:
+      - ../outputs/datasets:/data # datasets live here; all edits persist on the host
+      # optional: mount your SSH key to enable "Add → import from robot PC (.80)"
+      # - ~/.ssh:/root/.ssh:ro
+    restart: unless-stopped
+    # Linux hosts: uncomment so files written into the volume are owned by you, not root
+    # (the image makes /app/outputs world-writable to allow a non-root uid).
+    # user: "${UID:-1000}:${GID:-1000}"

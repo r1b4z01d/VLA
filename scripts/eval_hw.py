@@ -1,6 +1,7 @@
-"""Deploy a trained policy on the REAL hardware — the policy drives the UR5e + AmazingHand from live
-camera + proprioceptive observations. **MOTION-PRODUCING; keep the e-stop in hand.** Runs on the
-robot PC (that's where the cameras + RTDE + hand live).
+"""Deploy a trained policy (ACT or SmolVLA) on the REAL hardware — the policy drives the UR5e +
+AmazingHand from live camera + proprioceptive observations. The policy class is auto-detected from the
+checkpoint's config.json. **MOTION-PRODUCING; keep the e-stop in hand.** Runs on the robot PC (that's
+where the cameras + RTDE + hand live).
 
     ~/VLA/run.sh scripts/eval_hw.py --ckpt outputs/train/<run>/checkpoints/last/pretrained_model \
         --fps 12 [--video]
@@ -20,20 +21,25 @@ hardware — watch it and judge; `--video` records the scene feed for review. Sa
 no-go + `max_step` + IK-reachability clamps stay active, so the arm ramps toward targets and can't jump.
 
 Notes:
-- `--device cpu` by default (the robot PC has no CUDA). ACT is small; CPU inference keeps up at 12 fps.
-- Train on the GPU box's 0.4.4 `.venv` (matches the robot PC's lerobot 0.4.4) so the checkpoint loads
-  here without a config/version mismatch.
+- `--device cpu` by default (the robot PC has no CUDA). ACT (~52M) keeps up at 12 fps on CPU. **SmolVLA
+  (~450M) is ~2.6 s/inference on this CPU (measured) — unusable for real-time.** Run it via `--remote
+  HOST:PORT` (inference on the GPU box, see scripts/infer_server.py + ur5e_lerobot/remote.py); in remote
+  mode no policy/checkpoint/deps are needed here. Local SmolVLA only works at a very low query rate.
+- Policy class auto-detected from config.json. ACT loads on lerobot 0.4.4; SmolVLA also needs
+  `transformers` + `num2words` + the SmolVLM2 HF cache in the eval env (only relevant for LOCAL inference).
 - Offline box: seed `~/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth` once (the ACT backbone
   fetches ImageNet weights on build); `run.sh` sets `HF_HUB_OFFLINE=1`. Trained weights overwrite it.
 - `--steps N` (optional) auto-pauses after N *played* steps as a safety cap; default 0 = unlimited.
-- Reactivity: the checkpoint runs `n_action_steps == chunk_size` (fully OPEN-LOOP — one observation
-  then 100 blind actions). `--temporal-ensemble 0.01` (re-observe every step) or `--n-action-steps 8`
-  makes it closed-loop WITHOUT retraining — usually the difference between 0% and something.
+- Reactivity: both ACT (chunk 100) and SmolVLA (chunk 50) default to executing the whole chunk (fully
+  OPEN-LOOP). `--n-action-steps 8` (both) or `--temporal-ensemble 0.01` (ACT-only) makes it closed-loop
+  WITHOUT retraining.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import queue
 import time
 
@@ -41,7 +47,6 @@ import cv2
 import numpy as np
 import torch
 
-from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 from ur5e_lerobot.schema import ACTION_NAMES, STATE_NAMES
@@ -93,31 +98,51 @@ def _connect_with_hand_power(robot, robot_ip: str, voltage: int) -> None:
         robot.connect()
 
 
-def _set_reactivity(policy, n_action_steps, temporal_ensemble) -> None:
-    """Override ACT's action-chunk *execution* horizon at inference — NO retraining. The net always
-    predicts `chunk_size` actions; this only controls how many are executed before re-observing.
-    Lower = re-observe more often = more reactive/closed-loop. `temporal_ensemble` (a coeff, e.g. 0.01)
-    forces n_action_steps=1 and blends overlapping chunk predictions every step (ALOHA-style) — most
-    reactive. The checkpoint default (n_action_steps == chunk_size) is FULLY OPEN-LOOP."""
+def _load_policy(ckpt: str, device: str):
+    """Load whichever policy the checkpoint holds — ACT or SmolVLA — dispatching on config.json 'type'.
+    (SmolVLA needs `transformers` in the eval env for its SmolVLM backbone; the robot PC has it.)"""
+    ptype = json.load(open(os.path.join(ckpt, "config.json"))).get("type")
+    if ptype == "act":
+        from lerobot.policies.act.modeling_act import ACTPolicy as Cls
+    elif ptype == "smolvla":
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy as Cls
+    else:
+        raise SystemExit(f"eval_hw: unsupported policy type {ptype!r} (expected 'act' or 'smolvla')")
+    policy = Cls.from_pretrained(ckpt)
+    policy.eval()
+    policy.to(device)
+    return policy, ptype
+
+
+def _set_reactivity(policy, ptype, n_action_steps, temporal_ensemble) -> None:
+    """Override the policy's action-chunk *execution* horizon at inference — NO retraining. Both ACT and
+    SmolVLA predict `chunk_size` actions and default to executing all of them (fully OPEN-LOOP); this
+    controls how many run before re-observing. Lower = more reactive. `temporal_ensemble` (a coeff, e.g.
+    0.01) is ACT-only: forces n_action_steps=1 and blends overlapping chunk predictions every step."""
     cfg = policy.config
     if temporal_ensemble is not None:
-        from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
+        if ptype != "act":
+            print(f"[reactivity] --temporal-ensemble is ACT-only; ignoring for {ptype}")
+        else:
+            from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
 
-        cfg.temporal_ensemble_coeff = temporal_ensemble
-        cfg.n_action_steps = 1
-        policy.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble, cfg.chunk_size)
-        print(f"[reactivity] temporal ensemble coeff={temporal_ensemble}, n_action_steps=1 "
-              f"(re-observe every step — most reactive)")
-    elif n_action_steps is not None:
-        cfg.temporal_ensemble_coeff = None
+            cfg.temporal_ensemble_coeff = temporal_ensemble
+            cfg.n_action_steps = 1
+            policy.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble, cfg.chunk_size)
+            print(f"[reactivity] temporal ensemble coeff={temporal_ensemble}, n_action_steps=1 "
+                  f"(re-observe every step — most reactive)")
+            return
+    if n_action_steps is not None:
+        if getattr(cfg, "temporal_ensemble_coeff", None) is not None:
+            cfg.temporal_ensemble_coeff = None
         cfg.n_action_steps = n_action_steps
         print(f"[reactivity] n_action_steps={n_action_steps} of chunk_size={cfg.chunk_size} "
               f"(re-observe every {n_action_steps} steps)")
     else:
         openloop = cfg.n_action_steps and cfg.n_action_steps >= cfg.chunk_size
-        print(f"[reactivity] checkpoint default n_action_steps={cfg.n_action_steps}, "
+        print(f"[reactivity] {ptype} default n_action_steps={cfg.n_action_steps}, "
               f"chunk_size={cfg.chunk_size}"
-              + ("  ** FULLY OPEN-LOOP — try --temporal-ensemble 0.01 **" if openloop else ""))
+              + ("  ** FULLY OPEN-LOOP — try --n-action-steps 8 **" if openloop else ""))
 
 
 def _make_control(evq: "queue.Queue"):
@@ -176,7 +201,12 @@ def _rotvec_angle_deg(a, b) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Roll out a trained policy on the real UR5e + AmazingHand.")
-    ap.add_argument("--ckpt", required=True, help="path to .../checkpoints/last/pretrained_model")
+    ap.add_argument("--ckpt", help="path to .../checkpoints/last/pretrained_model (local inference)")
+    ap.add_argument("--remote", metavar="HOST:PORT",
+                    help="run inference on a remote GPU server (scripts/infer_server.py) instead of loading "
+                         "the policy here — for SmolVLA, which is too slow on the robot PC CPU. Reactivity "
+                         "is configured on the server. e.g. --remote <GPU_IP>:8777 (same subnet), or the "
+                         "Mac relay IP if bridging subnets")
     ap.add_argument("--steps", type=int, default=0, help="auto-pause after N played steps (0 = unlimited)")
     ap.add_argument("--fps", type=int, default=12, help="control rate; match the training data")
     ap.add_argument("--device", default="cpu")
@@ -188,40 +218,69 @@ def main() -> None:
     ap.add_argument("--video", action="store_true", help="record the played rollout (scene) to an MP4")
     ap.add_argument("--video-out", default="outputs/eval_hw.mp4")
     ap.add_argument("--n-action-steps", type=int, default=None,
-                    help="override ACT execution horizon (checkpoint=100 == fully open-loop; try 8-16 "
-                         "for closed-loop). Lower = re-observe more often = more reactive.")
+                    help="override the action-chunk execution horizon (ACT chunk=100, SmolVLA=50; both "
+                         "fully open-loop by default). Try 8-16 for closed-loop; lower = more reactive.")
     ap.add_argument("--temporal-ensemble", type=float, default=None, metavar="COEFF",
-                    help="enable ACT temporal ensembling (e.g. 0.01); forces n_action_steps=1 (re-observe "
-                         "every step, most reactive). Takes precedence over --n-action-steps.")
+                    help="ACT-only: temporal ensembling (e.g. 0.01); forces n_action_steps=1 (re-observe "
+                         "every step). Takes precedence over --n-action-steps; ignored for SmolVLA.")
     ap.add_argument("--log-csv", default="outputs/eval_hw_log.csv",
                     help="per-step diagnostics CSV (pose deltas, clamp, loop/inference timing)")
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
+    ap.add_argument("--ik-mode", choices=["servoL", "dls"], default="dls",
+                    help="arm IK: 'dls' (Python DLS+servoJ, singularity-robust — avoids the "
+                         "get_inverse_kin fault) or 'servoL' (proven Cartesian path, can fault near singularities)")
     args = ap.parse_args()
 
-    policy = ACTPolicy.from_pretrained(args.ckpt)
-    policy.eval()
-    policy.to(args.device)
-    pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
-                                         preprocessor_overrides={"device_processor": {"device": args.device}})
-    _set_reactivity(policy, args.n_action_steps, args.temporal_ensemble)
-    policy.reset()
+    remote_client = None
+    policy = pre = post = None
+    if args.remote:
+        from ur5e_lerobot.remote import RemotePolicyClient
+
+        host, _, port = args.remote.partition(":")
+        remote_client = RemotePolicyClient(host, int(port or 8777)).connect()
+        print(f"[policy] REMOTE inference @ {args.remote} — reactivity is configured on the server")
+    else:
+        if not args.ckpt:
+            ap.error("--ckpt is required for local inference (or use --remote HOST:PORT)")
+        policy, ptype = _load_policy(args.ckpt, args.device)
+        print(f"[policy] loaded {ptype} on {args.device}")
+        pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
+                                             preprocessor_overrides={"device_processor": {"device": args.device}})
+        _set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
+        policy.reset()
 
     robot, scene_fn, wrist_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
     _connect_with_hand_power(robot, args.robot_ip, args.tool_voltage)
     arm = getattr(robot, "arm", None)  # RtdeArmInterface — has start/stop_freedrive on hardware
+    if arm is not None and hasattr(arm, "ik_mode"):
+        arm.ik_mode = args.ik_mode  # policy eval defaults to 'dls' (singularity-robust); teleop stays servoL
+        print(f"[arm] ik_mode = {arm.ik_mode}")
 
     def chw(img):  # RGB HWC uint8 -> [1,3,H,W] float in [0,1] (preprocessor handles the rest)
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float().div(255)[None]
 
-    def observe():
+    def observe():  # raw pieces, consumed by either the local or remote infer()
         o = robot.get_observation()
         state = np.array([o[n] for n in STATE_NAMES], dtype=np.float32)
-        scene = scene_fn(640, 480)
-        obs = {"observation.state": torch.from_numpy(state)[None],
-               "observation.images.scene": chw(cv2.resize(scene, (W, H))),
-               "observation.images.wrist": chw(cv2.resize(wrist_fn(640, 480), (W, H))),
-               "task": [args.task]}
-        return obs, scene, state
+        return state, scene_fn(640, 480), wrist_fn(640, 480)
+
+    if remote_client is not None:
+        def infer(state, scene, wrist):  # ship the obs to the GPU server, get one action back
+            return remote_client.infer(state, cv2.resize(scene, (W, H)), cv2.resize(wrist, (W, H)), args.task)
+
+        def reset_policy():
+            remote_client.reset()
+    else:
+        def infer(state, scene, wrist):
+            obs = {"observation.state": torch.from_numpy(state)[None],
+                   "observation.images.scene": chw(cv2.resize(scene, (W, H))),
+                   "observation.images.wrist": chw(cv2.resize(wrist, (W, H))),
+                   "task": [args.task]}
+            with torch.no_grad():
+                return post(policy.select_action(pre(obs)))[0].cpu().numpy()
+
+        def reset_policy():
+            policy.reset()
 
     writer = None
     if args.video:
@@ -246,7 +305,7 @@ def main() -> None:
     def enter_playing() -> None:
         if st["mode"] == "freedrive":
             stop_freedrive()
-        policy.reset()          # fresh chunk: re-observe from wherever the arm is now
+        reset_policy()          # fresh chunk: re-observe from wherever the arm is now
         st["played"] = 0
         set_mode("playing")
 
@@ -268,7 +327,7 @@ def main() -> None:
         start clean — then FREEDRIVE to reposition and PLAY again."""
         if st["mode"] == "freedrive":
             stop_freedrive()
-        policy.reset()
+        reset_policy()
         st["played"] = 0
         set_mode("paused")
         print("[reset] policy reset — paused")
@@ -305,11 +364,22 @@ def main() -> None:
                 break
 
             if st["mode"] == "playing":
+                # A protective stop / e-stop halts the UR control script -> servoJ becomes a silent
+                # no-op (the arm freezes while the loop spams "control script not running"). Detect it,
+                # PAUSE, and reconnect (clears the protective stop + reuploads the script) so the run
+                # recovers cleanly instead of driving blind into a dead controller.
+                if arm is not None and hasattr(arm, "is_ready") and not arm.is_ready():
+                    set_mode("paused")
+                    try:
+                        print(f"[fault] UR control stopped (protective/e-stop) — reconnecting: {arm.reconnect()}")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[fault] UR control stopped; reconnect failed: {e}")
+                    print("  paused. clear the e-stop if engaged, FREEDRIVE to a safe pose, then PLAY.")
+                    continue
                 t0 = time.time()
-                obs, scene, state = observe()
+                state, scene, wrist = observe()
                 t_obs = time.time()
-                with torch.no_grad():
-                    act = post(policy.select_action(pre(obs)))[0].cpu().numpy()
+                act = infer(state, scene, wrist)
                 t_inf = time.time()
                 robot.send_action(dict(zip(ACTION_NAMES, act)))
                 t_snd = time.time()
@@ -355,6 +425,8 @@ def main() -> None:
             pass
         if pad is not None:
             pad.close()
+        if remote_client is not None:
+            remote_client.close()
         if writer is not None:
             writer.release()
             print(f"wrote {args.video_out}")

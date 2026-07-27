@@ -423,6 +423,17 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     ctrl = ManualController(session.home, grasp_mode=grasp_mode)  # arm's natural keyframe home, grasp 0
     ranges = ctrl.ranges()
 
+    # Captured home JOINT config for the deck 'Reset' key (hold-to-home). Persisted across runs.
+    import json as _json
+    HOME_PATH, HOME_DQ = "outputs/home_pose.json", 0.03  # rad/tick step (~0.36 rad/s at 12 fps)
+    hp = {"q": None}  # mutable holder; Set Home updates it
+    if os.path.exists(HOME_PATH):
+        try:
+            hp["q"] = _json.load(open(HOME_PATH)).get("q")
+            print(f"[home] loaded home pose from {HOME_PATH}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[home] could not load {HOME_PATH}: {e}")
+
     # Live input state — the mode is switchable at runtime via the dropdown, so keep the device
     # handles + current mode in a mutable dict (closures below read/mutate it).
     io = {"mode": input_mode, "sm": None, "gp": None, "gp_ok": False}
@@ -550,6 +561,34 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         for k, var in sliders.items():
             var.set(getattr(ctrl, k))
         grasp_var.set(ctrl.grasp)
+
+    def do_set_home() -> None:
+        """Capture the arm's CURRENT joint config as the home pose (freedrive there first). Persisted;
+        the deck 'Reset' key hold-returns to it."""
+        try:
+            q = [float(v) for v in session.robot.arm.get_joint_positions()]
+        except Exception as e:  # noqa: BLE001
+            log(f"set-home failed (no joint feedback): {e}")
+            return
+        hp["q"] = q
+        try:
+            os.makedirs("outputs", exist_ok=True)
+            _json.dump({"q": q, "tcp": [float(v) for v in session.robot.arm.get_ee_pose()]},
+                       open(HOME_PATH, "w"), indent=2)
+            log("home pose set ✓ — deck Reset (hold) returns here")
+        except Exception as e:  # noqa: BLE001
+            log(f"home set in memory; save failed: {e}")
+
+    def _rebase_ctrl() -> None:
+        """Snap the teleop target onto the arm's actual pose (no _home_rot change) so resuming teleop
+        after a hold-to-home / freedrive doesn't jump."""
+        try:
+            pose = session.robot.arm.get_ee_pose()
+        except Exception:  # noqa: BLE001
+            return
+        ctrl.x = _clamp(pose[0], *ranges["x"]); ctrl.y = _clamp(pose[1], *ranges["y"]); ctrl.z = _clamp(pose[2], *ranges["z"])
+        d = ctrl._home_rot.inv() * Rotation.from_rotvec(pose[3:6])
+        ctrl.roll, ctrl.pitch, ctrl.yaw = (float(a) for a in d.as_euler("xyz"))
 
     def do_save() -> None:
         import time
@@ -692,6 +731,7 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     btns = tk.Frame(win)
     actions = [
         ("Reset scene", do_reset),
+        ("🏠 Set Home", do_set_home),
         ("● Start rec", session.start_episode),
         ("■ Save ep", do_save),
         ("Discard", do_discard),
@@ -748,14 +788,16 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     # Deck layout (5x3, deck mounted upside down -> flip=True). Row 1: actions. Row 2: per-finger
     # OPEN + Open-All. Row 3: per-finger CLOSE + Close-All. In sd_fingers: finger index -1 == all
     # fingers; sign -1 == open, +1 == close.
-    sd_actions = {0: session.start_episode, 1: do_save, 2: do_discard, 3: do_reconnect, 4: on_close}
-    sd_action_labels = {0: "● REC", 1: "■ Save", 2: "Discard", 3: "⟳ Recon", 4: "Quit"}
+    # Keys 0/3/4 are fixed actions. Keys 1/2 are recording-state-dependent (handled in _pump_streamdeck):
+    #   recording -> 1=Save, 2=Discard   |   idle -> 1=Reset (hold->home), 2=Freedrive (toggle).
+    sd_actions = {0: session.start_episode, 3: do_reconnect, 4: on_close}
+    sd_action_labels = {0: "● REC", 3: "⟳ Recon", 4: "Quit"}
     sd_fingers = {5: (0, -1), 6: (1, -1), 7: (2, -1), 8: (3, -1), 9: (-1, -1),
                   10: (0, +1), 11: (1, +1), 12: (2, +1), 13: (3, +1), 14: (-1, +1)}
     sd_labels = {5: "idx\nopen", 6: "mid\nopen", 7: "rng\nopen", 8: "thb\nopen", 9: "OPEN\nALL",
                  10: "idx\nclose", 11: "mid\nclose", 12: "rng\nclose", 13: "thb\nclose", 14: "CLOSE\nALL"}
-    sd = {"pad": None, "queue": _queue.Queue(), "held": {},
-          "rec_bg": None, "save_bg": None, "save_flash_until": 0.0}  # deck key-blink state
+    sd = {"pad": None, "queue": _queue.Queue(), "held": {}, "reset_held": False, "prev_mode": "spacemouse",
+          "rec_bg": None, "k1": None, "k2": None, "save_flash_until": 0.0}  # deck key-render state
     try:
         from .streamdeck import StreamDeckPad
 
@@ -769,6 +811,14 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     except Exception as e:  # noqa: BLE001 — the panel runs fine without a deck
         log(f"Stream Deck not available ({e})")
 
+    def _toggle_freedrive_key() -> None:
+        # deck key 2 when idle: flip between teach mode and the prior driving input
+        if io["mode"] == "freedrive":
+            switch_mode(sd["prev_mode"])
+        else:
+            sd["prev_mode"] = io["mode"] if io["mode"] != "freedrive" else "spacemouse"
+            switch_mode("freedrive")
+
     def _pump_streamdeck() -> None:
         moved = False
         while True:  # drain events pushed from the deck's callback thread
@@ -778,7 +828,19 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
                 break
             if key in sd_actions:
                 if down:
-                    sd_actions[key]()          # fire the action on press
+                    sd_actions[key]()          # fixed actions (REC / Recon / Quit)
+            elif key == 1:                     # Save (recording) | Reset-hold (idle)
+                if session.recording:
+                    if down:
+                        do_save()
+                else:
+                    sd["reset_held"] = down
+            elif key == 2:                     # Discard (recording) | Freedrive-toggle (idle)
+                if session.recording:
+                    if down:
+                        do_discard()
+                elif down:
+                    _toggle_freedrive_key()
             elif key in sd_fingers:
                 sd["held"][key] = down          # hold-to-ramp
         for key, held in sd["held"].items():
@@ -792,21 +854,33 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
             grasp_var.set(ctrl.grasp)
 
     def _update_deck_status() -> None:
-        # Blink REC (key 0) while recording; flash Save (key 1) briefly after a save. Re-render a key
-        # only when its background actually changes (cheap).
+        # Keys 0/1/2 are dynamic: REC blinks red while recording; 1=Save(recording, flashes green on
+        # save)/Reset(idle); 2=Discard(recording)/Freedrive(idle, blue when on). Re-render only on change.
         pad = sd["pad"]
         if pad is None:
             return
         import time
+        rec = session.recording
         on = int(time.time() * 1.5) % 2 == 0  # ~1.5 Hz blink phase
-        rec_bg = ((200, 30, 30) if on else (45, 0, 0)) if session.recording else (25, 25, 25)
+        rec_bg = ((200, 30, 30) if on else (45, 0, 0)) if rec else (25, 25, 25)
         if rec_bg != sd["rec_bg"]:
             pad.set_label(0, "● REC", bg=rec_bg)
             sd["rec_bg"] = rec_bg
-        save_bg = ((20, 170, 20) if on else (0, 55, 0)) if time.time() < sd["save_flash_until"] else (25, 25, 25)
-        if save_bg != sd["save_bg"]:
-            pad.set_label(1, "■ Save", bg=save_bg)
-            sd["save_bg"] = save_bg
+        if rec:
+            sbg = ((20, 170, 20) if on else (0, 55, 0)) if time.time() < sd["save_flash_until"] else (25, 25, 25)
+            k1 = ("■ Save", sbg)
+        else:
+            k1 = ("Reset\nhome", (150, 112, 22))
+        if k1 != sd["k1"]:
+            pad.set_label(1, k1[0], bg=k1[1])
+            sd["k1"] = k1
+        if rec:
+            k2 = ("Discard", (25, 25, 25))
+        else:
+            k2 = ("FREE\ndrive", (30, 90, 175) if io["mode"] == "freedrive" else (60, 60, 64))
+        if k2 != sd["k2"]:
+            pad.set_label(2, k2[0], bg=k2[1])
+            sd["k2"] = k2
 
     period = max(1, int(1000 / fps))
     dt = 1.0 / fps
@@ -882,10 +956,16 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     tickn = {"i": 0}
 
     def tick() -> None:
-        _pump_streamdeck()  # drain deck key events (actions + per-finger ramp)
-        _update_deck_status()  # blink REC while recording / flash Save after a save
+        _pump_streamdeck()  # drain deck key events (actions + per-finger ramp + reset/freedrive keys)
+        _update_deck_status()  # dynamic deck labels: REC blink, Save/Reset, Discard/Freedrive
         mode = io["mode"]
-        if mode == "gamepad" and io["gp"] is not None:
+        # Hold-to-home: deck Reset held while idle -> slow joint-space return to the captured home. Drives
+        # the arm directly (servoJ) and re-bases the teleop target so releasing Reset doesn't jump.
+        resetting = sd["reset_held"] and not session.recording and mode != "freedrive" and hp["q"] is not None
+        if resetting:
+            session.robot.arm.home_step(hp["q"], HOME_DQ)
+            _rebase_ctrl()
+        elif mode == "gamepad" and io["gp"] is not None:
             if io["gp_ok"]:
                 _apply_gamepad()  # else: uncalibrated -> don't move the arm until 'Calibrate GP' is run
         elif mode == "spacemouse" and io["sm"] is not None:
@@ -901,7 +981,7 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
             action_vec = ctrl.action_vector()
         scene_img, wrist_img = session.step(
             action_vec, task_var.get(), record=session.recording, do_wrist=do_wrist,
-            command_arm=(mode != "freedrive"),
+            command_arm=(mode != "freedrive") and not resetting,  # during reset, home_step drives the arm
         )
         def _fit(img, cell, label):  # letterbox into the cell; identical logic -> equal display sizes
             pil = Image.fromarray(img)
