@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RobotDisco Dataset Manager</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <nav class="views" id="view-nav">
+      <button class="nav-btn active" data-view="datasets">Datasets</button>
+      <button class="nav-btn" data-view="models">Models</button>
+      <button class="nav-btn" data-view="evals">Evals</button>
+    </nav>
+    <div class="brand">RobotDisco <span>VLA</span> Manager</div>
+    <div class="hdr-right">
+      <span id="monitor" class="monitor" title="folder monitor">monitoring…</span>
+      <span id="datasets-dir" class="muted mono"></span>
+      <button id="btn-refresh" class="btn">↻ Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== Datasets view ===== -->
+    <div id="view-datasets" class="view">
+    <!-- Datasets explorer -->
+    <section id="datasets-panel" class="panel">
+      <div class="panel-head">
+        <button id="ds-collapse" class="btn icon" title="collapse / expand datasets">«</button>
+        <h2>Datasets</h2>
+        <div class="row-actions">
+          <button id="btn-add" class="btn">+ Add</button>
+          <button id="btn-merge" class="btn" disabled>Merge…</button>
+        </div>
+      </div>
+      <div id="dataset-list" class="dataset-list"></div>
+    </section>
+
+    <!-- Episodes + player -->
+    <section id="work-panel" class="panel grow">
+      <div class="panel-head">
+        <button id="ep-collapse" class="btn icon" title="collapse / expand episode list">▾</button>
+        <h2 id="episodes-title">Episodes</h2>
+        <div class="row-actions" id="episode-toolbar" hidden>
+          <button id="btn-rename-task" class="btn">Rename task…</button>
+          <button id="btn-to-video" class="btn">Export video</button>
+          <button id="btn-del-selected" class="btn danger" disabled>Delete selected</button>
+        </div>
+      </div>
+
+      <div id="episodes-wrap" class="episodes-wrap">
+        <div class="placeholder" id="episodes-empty">Select a dataset to see its episodes.</div>
+        <table id="episodes-table" hidden>
+          <thead>
+            <tr>
+              <th class="c-sel"><input type="checkbox" id="sel-all" /></th>
+              <th class="c-ep">ep</th>
+              <th>task</th>
+              <th class="c-len">frames</th>
+              <th class="c-len">dur</th>
+              <th class="c-rate">rating</th>
+              <th>notes</th>
+              <th class="c-op">operator</th>
+              <th class="c-act">actions</th>
+            </tr>
+          </thead>
+          <tbody id="episodes-body"></tbody>
+        </table>
+      </div>
+
+      <div class="player">
+        <div class="player-head">
+          <span id="player-label" class="muted">Player</span>
+          <!-- inline episode controls, shown only when the episode list is collapsed + something is playing -->
+          <div id="player-ep-controls" class="player-ep-controls" hidden></div>
+          <div class="row-actions">
+            <button id="btn-prev-ep" class="btn tiny" title="previous episode (←)" disabled>◀ Prev</button>
+            <button id="btn-next-ep" class="btn tiny" title="next episode (→)" disabled>Next ▶</button>
+            <button id="btn-player-close" class="btn tiny" hidden>✕ close</button>
+          </div>
+        </div>
+        <div id="player-frame" class="player-frame">
+          <div class="placeholder">Press ▶ on an episode to play it in the rerun viewer.</div>
+        </div>
+      </div>
+    </section>
+    </div><!-- /view-datasets -->
+
+    <!-- ===== Models view ===== -->
+    <div id="view-models" class="view" hidden>
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Models</h2>
+          <div class="row-actions">
+            <span id="models-summary" class="muted"></span>
+            <button id="btn-models-refresh" class="btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div id="models-list" class="cards-list"></div>
+      </section>
+    </div><!-- /view-models -->
+
+    <!-- ===== Evals view ===== -->
+    <div id="view-evals" class="view" hidden>
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Evals</h2>
+          <div class="row-actions">
+            <button id="btn-eval-new" class="btn">+ New eval</button>
+            <button id="btn-evals-refresh" class="btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div id="evals-wrap" class="cards-list"></div>
+      </section>
+    </div><!-- /view-evals -->
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

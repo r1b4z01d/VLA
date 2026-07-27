@@ -1,0 +1,7 @@
+# Web UI extra deps (on top of the project venv, which already has lerobot + rerun-sdk + pyarrow).
+# Install into the SAME venv that runs the app (GPU box OR Mac):
+#     uv pip install -r webui/requirements.txt
+# pydantic 2.x / aiohttp / httpx are already pulled in by lerobot; only these two are new.
+# (Not needed for the Docker path — webui/Dockerfile installs these itself.)
+fastapi
+uvicorn[standard]
