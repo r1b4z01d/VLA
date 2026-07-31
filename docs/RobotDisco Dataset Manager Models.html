@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!-- saved from url=(0034)http://192.168.11.130:8080/#models -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RobotDisco Dataset Manager</title>
+  <link rel="stylesheet" href="./RobotDisco Dataset Manager Models_files/style.css">
+</head>
+<body>
+  <header>
+    <nav class="views" id="view-nav">
+      <button class="nav-btn" data-view="datasets">Datasets</button>
+      <button class="nav-btn active" data-view="models">Models</button>
+      <button class="nav-btn" data-view="evals">Evals</button>
+    </nav>
+    <div class="brand">RobotDisco <span>VLA</span> Manager</div>
+    <div class="hdr-right">
+      <span id="monitor" class="monitor" title="folder monitor">monitoring…</span>
+      <span id="datasets-dir" class="muted mono">/home/bryan/VLA/outputs/datasets</span>
+      <button id="btn-refresh" class="btn">↻ Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== Datasets view ===== -->
+    <div id="view-datasets" class="view" hidden="">
+    <!-- Datasets explorer -->
+    <section id="datasets-panel" class="panel">
+      <div class="panel-head">
+        <button id="ds-collapse" class="btn icon" title="collapse / expand datasets">«</button>
+        <h2>Datasets</h2>
+        <div class="row-actions">
+          <button id="btn-add" class="btn">+ Add</button>
+          <button id="btn-merge" class="btn" disabled="">Merge…</button>
+        </div>
+      </div>
+      <div id="dataset-list" class="dataset-list"><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">First Act Training</span><span class="badge image">image</span></div><div class="ds-meta">36 eps · 12598 frames · 12fps · 1590MB</div><div class="ds-meta">task: put the block on the green pad</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">HD Bucket Pickup Only</span><span class="badge image">image</span></div><div class="ds-meta">1 eps · 152 frames · 12fps · 38.3MB</div><div class="ds-meta">task: hd bucket to tray</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">HD Bucket To Tray</span><span class="badge image">image</span></div><div class="ds-meta">52 eps · 7126 frames · 12fps · 1807MB</div><div class="ds-meta">task: hd bucket to tray, HD bucket to tray</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">hw_pickplace</span><span class="badge image">image</span></div><div class="ds-meta">23 eps · 6313 frames · 12fps · 1386.3MB</div><div class="ds-meta">task: pick up the HD bucket, Pick up the Home Depot bucket</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">hw_pickplace_video</span><span class="badge video">video</span></div><div class="ds-meta">23 eps · 6313 frames · 12fps · 43.5MB</div><div class="ds-meta">task: pick up the HD bucket, Pick up the Home Depot bucket</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">manual_5</span><span class="badge image">image</span></div><div class="ds-meta">16 eps · 8541 frames · 20fps · 3257.4MB</div><div class="ds-meta">task: put the block on the green pad</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">manual_box</span><span class="badge video">video</span></div><div class="ds-meta">0 eps · 0 frames · 12fps · 162.7MB</div><div class="ds-meta">task: —</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">manual_box_1</span><span class="badge video">video</span></div><div class="ds-meta">1 eps · 366 frames · 12fps · 4.2MB</div><div class="ds-meta">task: put the block on the green pad</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div><div class="ds-card"><div class="ds-top"><input class="ds-check" type="checkbox" title="select for merge"><span class="ds-name">merged</span><span class="badge image">image</span></div><div class="ds-meta">36 eps · 12598 frames · 12fps · 1590MB</div><div class="ds-meta">task: put the block on the green pad</div><div class="ds-foot"><button class="btn tiny">rename</button><button class="btn tiny">Export video</button><button class="btn tiny danger">delete</button></div></div></div>
+    </section>
+
+    <!-- Episodes + player -->
+    <section id="work-panel" class="panel grow">
+      <div class="panel-head">
+        <button id="ep-collapse" class="btn icon" title="collapse / expand episode list">▾</button>
+        <h2 id="episodes-title">Episodes</h2>
+        <div class="row-actions" id="episode-toolbar" hidden="">
+          <button id="btn-rename-task" class="btn">Rename task…</button>
+          <button id="btn-to-video" class="btn">Export video</button>
+          <button id="btn-del-selected" class="btn danger" disabled="">Delete selected</button>
+        </div>
+      </div>
+
+      <div id="episodes-wrap" class="episodes-wrap">
+        <div class="placeholder" id="episodes-empty">Select a dataset to see its episodes.</div>
+        <table id="episodes-table" hidden="">
+          <thead>
+            <tr>
+              <th class="c-sel"><input type="checkbox" id="sel-all"></th>
+              <th class="c-ep">ep</th>
+              <th>task</th>
+              <th class="c-len">frames</th>
+              <th class="c-len">dur</th>
+              <th class="c-rate">rating</th>
+              <th>notes</th>
+              <th class="c-op">operator</th>
+              <th class="c-act">actions</th>
+            </tr>
+          </thead>
+          <tbody id="episodes-body"></tbody>
+        </table>
+      </div>
+
+      <div class="player">
+        <div class="player-head">
+          <span id="player-label" class="muted">Player</span>
+          <!-- inline episode controls, shown only when the episode list is collapsed + something is playing -->
+          <div id="player-ep-controls" class="player-ep-controls" hidden=""></div>
+          <div class="row-actions">
+            <button id="btn-prev-ep" class="btn tiny" title="previous episode (←)" disabled="">◀ Prev</button>
+            <button id="btn-next-ep" class="btn tiny" title="next episode (→)" disabled="">Next ▶</button>
+            <button id="btn-player-close" class="btn tiny" hidden="">✕ close</button>
+          </div>
+        </div>
+        <div id="player-frame" class="player-frame">
+          <div class="placeholder">Press ▶ on an episode to play it in the rerun viewer.</div>
+        </div>
+      </div>
+    </section>
+    </div><!-- /view-datasets -->
+
+    <!-- ===== Models view ===== -->
+    <div id="view-models" class="view">
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Models</h2>
+          <div class="row-actions">
+            <span id="models-summary" class="muted">6 model(s) · 1 training</span>
+            <button id="btn-models-refresh" class="btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div id="models-list" class="cards-list"><div class="card training"><div class="card-top"><span class="card-name">hd_bucket_to_tray_smolvla</span><span class="badge-status training">training</span></div><div class="card-meta"><span>policy: <b>smolvla</b></span><span>dataset: <b>local/hd_bucket_to_tray</b></span><span>steps: <b>20000</b></span><span>checkpoints: <b>005000, 010000</b></span><span>size: <b>3.1 GB</b></span><span>created: <b>7/24/2026, 12:06:31 AM</b></span></div><div class="card-meta live">step 14272/20000 (71%) · loss 0.021 · 3.37 step/s · ETA 28:17</div><div class="progress"><span style="width:71%"></span></div><div class="card-foot"><span class="muted">actions available once training finishes</span></div></div><div class="card"><div class="card-top"><span class="card-name">hw_pickplace_smolvla</span><span class="badge-status done">done</span></div><div class="card-meta"><span>policy: <b>smolvla</b></span><span>dataset: <b>local/hw_pickplace</b></span><span>steps: <b>20000</b></span><span>checkpoints: <b>020000</b></span><span>size: <b>1.5 GB</b></span><span>created: <b>7/22/2026, 1:53:27 AM</b></span></div><div class="card-foot"><a class="btn tiny" href="http://192.168.11.130:8080/api/models/hw_pickplace_smolvla/download">⬇ download</a><button class="btn tiny">rename</button><button class="btn tiny danger">delete</button></div></div><div class="card"><div class="card-top"><span class="card-name">hw_pickplace_act</span><span class="badge-status done">done</span></div><div class="card-meta"><span>policy: <b>act</b></span><span>dataset: <b>local/hw_pickplace</b></span><span>steps: <b>50000</b></span><span>checkpoints: <b>020000, 040000, 050000</b></span><span>size: <b>1.8 GB</b></span><span>created: <b>7/8/2026, 1:52:36 AM</b></span></div><div class="card-foot"><a class="btn tiny" href="http://192.168.11.130:8080/api/models/hw_pickplace_act/download">⬇ download</a><button class="btn tiny">rename</button><button class="btn tiny danger">delete</button></div></div><div class="card"><div class="card-top"><span class="card-name">merged_act</span><span class="badge-status done">done</span></div><div class="card-meta"><span>policy: <b>act</b></span><span>dataset: <b>local/ur5e_amazinghand_merged</b></span><span>steps: <b>50000</b></span><span>checkpoints: <b>010000, 020000, 030000, 040000, 050000</b></span><span>size: <b>3.0 GB</b></span><span>created: <b>6/19/2026, 10:54:39 PM</b></span></div><div class="card-foot"><a class="btn tiny" href="http://192.168.11.130:8080/api/models/merged_act/download">⬇ download</a><button class="btn tiny">rename</button><button class="btn tiny danger">delete</button></div></div><div class="card"><div class="card-top"><span class="card-name">act_smoke</span><span class="badge-status done">done</span></div><div class="card-meta"><span>policy: <b>act</b></span><span>dataset: <b>local/ur5e_amazinghand_manual</b></span><span>steps: <b>100</b></span><span>checkpoints: <b>000100</b></span><span>size: <b>592 MB</b></span><span>created: <b>6/13/2026, 7:10:45 PM</b></span></div><div class="card-foot"><a class="btn tiny" href="http://192.168.11.130:8080/api/models/act_smoke/download">⬇ download</a><button class="btn tiny">rename</button><button class="btn tiny danger">delete</button></div></div><div class="card"><div class="card-top"><span class="card-name">pusht_gpu_smoke</span><span class="badge-status done">done</span></div><div class="card-meta"><span>policy: <b>diffusion</b></span><span>dataset: <b>lerobot/pusht</b></span><span>steps: <b>300</b></span><span>checkpoints: <b>000300</b></span><span>size: <b>3.0 GB</b></span><span>created: <b>6/13/2026, 4:12:49 PM</b></span></div><div class="card-foot"><a class="btn tiny" href="http://192.168.11.130:8080/api/models/pusht_gpu_smoke/download">⬇ download</a><button class="btn tiny">rename</button><button class="btn tiny danger">delete</button></div></div></div>
+      </section>
+    </div><!-- /view-models -->
+
+    <!-- ===== Evals view ===== -->
+    <div id="view-evals" class="view" hidden="">
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Evals</h2>
+          <div class="row-actions">
+            <button id="btn-eval-new" class="btn">+ New eval</button>
+            <button id="btn-evals-refresh" class="btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div id="evals-wrap" class="cards-list"></div>
+      </section>
+    </div><!-- /view-evals -->
+  </main>
+
+  <div id="toast" class="toast" hidden=""></div>
+  <script src="./RobotDisco Dataset Manager Models_files/app.js"></script>
+
+
+</body></html>

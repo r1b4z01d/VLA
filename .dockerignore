@@ -1,0 +1,20 @@
+# Keep the build context tiny — the image only COPYs webui/. Exclude the multi-GB / irrelevant trees.
+.venv
+.venv-044
+outputs
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+.mypy_cache
+.pytest_cache
+assets
+ros2_ws
+docs
+scripts
+ur5e_lerobot
+*.mp4
+*.png
+*.code-workspace
+.DS_Store
+._*
