@@ -34,7 +34,8 @@ def scripted_action(step: int, period: int, home: list[float]) -> list[float]:
     return Action(tuple(ee[:6]), tuple(curls)).to_vector()
 
 
-def build_features(width: int, height: int, use_videos: bool, with_wrist: bool = True) -> dict:
+def build_features(width: int, height: int, use_videos: bool, with_wrist: bool = True,
+                   with_side: bool = False) -> dict:
     img_dtype = "video" if use_videos else "image"
 
     def img():
@@ -47,15 +48,18 @@ def build_features(width: int, height: int, use_videos: bool, with_wrist: bool =
     }
     if with_wrist:
         feats["observation.images.wrist"] = img()
+    if with_side:
+        feats["observation.images.side"] = img()  # 2nd 3rd-person view (occlusion coverage)
     return feats
 
 
 def make_engine(engine: str, settle_steps: int = 40, *, robot_ip: str = "192.168.11.21",
-                hand_host: str = "192.168.11.117", scene_cam=None, wrist_cam=None):
-    """Return (robot, scene_render_fn, wrist_render_fn). wrist_render_fn is None if absent.
+                hand_host: str = "192.168.11.117", scene_cam=None, wrist_cam=None, side_cam=None):
+    """Return (robot, scene_render_fn, wrist_render_fn, side_render_fn). wrist/side are None if absent.
 
     engine: 'mujoco' (sim), 'kinematic' (fast stub), or 'hardware' (real UR5e via RTDE +
     AmazingHand TCP + USB cameras). The hardware kwargs are ignored by the sim engines.
+    side_cam: None disables the 2nd scene cam; True uses cameras.SIDE_CAM; or pass a device path.
     """
     cfg = URAmazingHandConfig(id="sim", cameras={})
     if engine == "mujoco":
@@ -67,16 +71,21 @@ def make_engine(engine: str, settle_steps: int = 40, *, robot_ip: str = "192.168
             robot,
             (lambda w, h: cell.render(width=w, height=h)),
             (lambda w, h: cell.render_wrist(width=w, height=h)),
+            None,  # no side cam in sim
         )
 
     if engine == "hardware":
         from ..hand import AmazingHandClient
         from ..robot.rtde_arm import RtdeArmInterface
         from ..sensors import UsbCamera
-        from ..sensors.cameras import SCENE_CAM, WRIST_CAM
+        from ..sensors.cameras import (SCENE_CAM, SCENE_GAIN, SCENE_ROTATE, SIDE_CAM,
+                                        SIDE_GAIN, SIDE_ROTATE, WRIST_CAM, WRIST_GAIN,
+                                        WRIST_ROTATE)
 
-        scene_cam = SCENE_CAM if scene_cam is None else scene_cam  # stable by-id paths by default
+        scene_cam = SCENE_CAM if scene_cam is None else scene_cam  # stable device paths by default
         wrist_cam = WRIST_CAM if wrist_cam is None else wrist_cam
+        if side_cam is True:  # enable the 2nd scene cam using the configured default port
+            side_cam = SIDE_CAM
         robot = URAmazingHand(cfg, arm=RtdeArmInterface(robot_ip), hand=AmazingHandClient(hand_host))
 
         def _grab(cam: UsbCamera):
@@ -86,10 +95,12 @@ def make_engine(engine: str, settle_steps: int = 40, *, robot_ip: str = "192.168
                 return cam.read(w, h)
             return read
 
-        # Scene cam is mounted upside down -> rotate 180°. Wrist is intentionally left UN-flipped to match
-        # the existing hw_pickplace dataset + checkpoint (recorded pre-flip); keep record + eval on this
-        # convention so training data and the deployed policy's observations stay consistent.
-        return robot, _grab(UsbCamera(scene_cam, rotate180=True)), _grab(UsbCamera(wrist_cam))
+        # Per-camera mount orientation lives in cameras.py (SCENE/WRIST/SIDE_ROTATE) so it's tweakable in
+        # one place while dialing in the physical mounts — watch the live panel and adjust those constants.
+        side_fn = (_grab(UsbCamera(side_cam, rotate=SIDE_ROTATE, gain=SIDE_GAIN))
+                   if side_cam else None)
+        return (robot, _grab(UsbCamera(scene_cam, rotate=SCENE_ROTATE, gain=SCENE_GAIN)),
+                _grab(UsbCamera(wrist_cam, rotate=WRIST_ROTATE, gain=WRIST_GAIN)), side_fn)
 
     from .amazing_hand_mujoco import AmazingHandMujoco
     from .sim_arm import SimArm
@@ -97,7 +108,7 @@ def make_engine(engine: str, settle_steps: int = 40, *, robot_ip: str = "192.168
 
     sim = AmazingHandMujoco()
     robot = URAmazingHand(cfg, arm=SimArm(), hand=SimHand(sim=sim, settle_steps=8))
-    return robot, (lambda w, h: sim.render(width=w, height=h)), None
+    return robot, (lambda w, h: sim.render(width=w, height=h)), None, None
 
 
 def main() -> None:
@@ -113,13 +124,14 @@ def main() -> None:
     ap.add_argument("--task", default="dip and grasp")
     args = ap.parse_args()
 
-    robot, render, render_wrist = make_engine(args.engine)
+    robot, render, render_wrist, render_side = make_engine(args.engine)
     robot.connect()
 
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id,
         fps=args.fps,
-        features=build_features(args.width, args.height, use_videos=False, with_wrist=render_wrist is not None),
+        features=build_features(args.width, args.height, use_videos=False,
+                                with_wrist=render_wrist is not None, with_side=render_side is not None),
         root=args.root,
         robot_type=robot.name,
         use_videos=False,
@@ -140,6 +152,8 @@ def main() -> None:
             }
             if render_wrist is not None:
                 frame["observation.images.wrist"] = render_wrist(args.width, args.height)
+            if render_side is not None:
+                frame["observation.images.side"] = render_side(args.width, args.height)
             dataset.add_frame(frame)
             robot.send_action(dict(zip(ACTION_NAMES, action)))
         dataset.save_episode()

@@ -249,7 +249,8 @@ def main() -> None:
         _set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
         policy.reset()
 
-    robot, scene_fn, wrist_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
+    # side_fn ignored until a 3-cam policy is trained (then wire it through remote.py + infer_server too)
+    robot, scene_fn, wrist_fn, _side_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
     _connect_with_hand_power(robot, args.robot_ip, args.tool_voltage)
     arm = getattr(robot, "arm", None)  # RtdeArmInterface — has start/stop_freedrive on hardware
     if arm is not None and hasattr(arm, "ik_mode"):

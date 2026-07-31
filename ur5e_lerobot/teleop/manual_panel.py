@@ -24,14 +24,17 @@ from ..schema import ACTION_NAMES, ARM_POSE_NAMES, STATE_NAMES, Action
 from ..sim.record_sim import make_engine
 
 SLIDER_ORDER = ("x", "y", "z", "roll", "pitch", "yaw")
-# Position sliders span home ± delta (z wide so the EE can reach the floor).
-POS_DELTAS = {"x": 0.40, "y": 0.30, "z": 0.45}
+# Teleop target is clamped to home ± delta, anchored at the arm's pose WHEN THE PANEL STARTED (not the
+# live pose). Keep this box INSIDE the arm's well-conditioned workspace: driving the target near full
+# extension / a singularity makes servoL oscillate -> the arm jerks. Start the panel with the EE
+# centered over the workspace so a modest box reaches everything. Bump one axis at a time + test.
+POS_DELTAS = {"x": 0.40, "y": 0.40, "z": 0.45}
 
 # SpaceMouse teleop gains (per second at full deflection); tune to taste.
 SM_POS_GAIN = 0.131  # m/s  (was 0.175; -25%)
 SM_ROT_GAIN = 0.45   # rad/s (was 0.6;   -25%)
-SM_GRASP_CLOSE_RATE = 0.052  # grasp close per tick while the close button is held (2x faster)
-SM_GRASP_OPEN_RATE = 0.030   # grasp open per tick while the open button is held (2x faster)
+SM_GRASP_CLOSE_RATE = 0.104  # grasp close per tick while the close button is held
+SM_GRASP_OPEN_RATE = 0.060   # grasp open per tick while the open button is held
 SM_DEADBAND = 0.12    # ignore tiny center deflections (helps isolate a single axis)
 SM_BTN_CLOSE = 0      # SpaceMouse button index that slowly CLOSES the grasp
 SM_BTN_OPEN = 1       # SpaceMouse button index that slowly OPENS the grasp (swap if reversed)
@@ -69,6 +72,10 @@ GRASP_MODES = {
     "pinch": (0.8, 1.0, 1.0, 0.8),
     "full": (1.0, 1.0, 1.0, 1.0),
 }
+
+# Stream Deck bottom row (the finger-CLOSE keys, logical 10-14) is temporarily repurposed as a 1-5
+# star episode rating after Save. Left->right = 1..5 stars.
+RATING_KEYS = (10, 11, 12, 13, 14)
 
 # Box-color choices (RGBA, 0..1) for the panel dropdown — ROYGBIV, in order.
 ROYGBIV = [
@@ -148,8 +155,9 @@ class SimSession:
 
     def __init__(self, engine: str, repo_id: str, root: str, fps=20, width=320, height=240,
                  use_videos=False, resume=False, hw=None, tool_voltage: int = 12):
-        self.robot, self._render_fn, self._wrist_fn = make_engine(engine, **(hw or {}))
+        self.robot, self._render_fn, self._wrist_fn, self._side_fn = make_engine(engine, **(hw or {}))
         self.has_wrist = self._wrist_fn is not None
+        self.has_side = self._side_fn is not None
         self._engine = engine
         self._robot_ip = (hw or {}).get("robot_ip")
         self._tool_voltage = tool_voltage
@@ -160,7 +168,10 @@ class SimSession:
         self.fps, self.width, self.height = fps, width, height  # width/height = DATASET image size
         self.use_videos = use_videos  # True (box, has ffmpeg) -> video dataset = fast training-time loading
         self.resume = resume  # append into an existing dataset at `root` instead of creating it
-        self.disp_w, self.disp_h = 640, 480  # render the scene crisp (render cost is size-independent)
+        # Render >= the dataset size so the recorded frame is always a DOWNSAMPLE of the native
+        # capture, never an upsample. Sim renders crisp at >=640x480; hardware records at the dataset
+        # size (cameras capture native 1080p, so 960x540 keeps real detail).
+        self.disp_w, self.disp_h = max(640, width), max(480, height)
         self.dataset = None
         self.recording = False
         self.episodes = 0
@@ -224,7 +235,8 @@ class SimSession:
             self.dataset = LeRobotDataset.create(
                 repo_id=self.repo_id,
                 fps=self.fps,
-                features=build_features(self.width, self.height, use_videos=self.use_videos, with_wrist=self.has_wrist),
+                features=build_features(self.width, self.height, use_videos=self.use_videos,
+                                        with_wrist=self.has_wrist, with_side=self.has_side),
                 root=self.root,
                 robot_type=self.robot.name,
                 use_videos=self.use_videos,
@@ -236,16 +248,20 @@ class SimSession:
     def render_wrist(self):
         return self._wrist_fn(self.width, self.height) if self.has_wrist else None
 
-    def step(self, action_vec, task: str, record: bool, do_wrist: bool = True, command_arm: bool = True):
-        """observe (scene + wrist) -> record -> act. Returns (scene_img, wrist_img|None).
+    def render_side(self):
+        return self._side_fn(self.width, self.height) if self.has_side else None
 
-        Scene is rendered crisp (disp size) for the display; the recorded frame is
-        downsampled to the dataset size. do_wrist=False skips the wrist render this tick for a
-        snappier loop; when recording we always render it so every frame has both cameras.
+    def step(self, action_vec, task: str, record: bool, do_wrist: bool = True, command_arm: bool = True):
+        """observe (scene + side + wrist) -> record -> act. Returns (scene_img, wrist_img|None, side_img|None).
+
+        Scene + side (both 3rd-person) are rendered crisp (disp size) for the display; the recorded
+        frame is downsampled to the dataset size. do_wrist=False skips the wrist render this tick for a
+        snappier loop; when recording we always render it so every frame has all cameras.
         command_arm=False (freedrive): the arm is hand-guided, so only the hand (grasp) is driven —
         the recorded action's arm pose is the actual pose the human moved through.
         """
         scene = self.render()  # disp_w x disp_h (crisp)
+        side = self._side_fn(self.disp_w, self.disp_h) if self.has_side else None  # 2nd scene, crisp for display
         wrist = self.render_wrist() if (self.has_wrist and (record or do_wrist)) else None
         if record:
             import cv2
@@ -262,6 +278,8 @@ class SimSession:
             }
             if wrist is not None:
                 frame["observation.images.wrist"] = wrist
+            if side is not None:
+                frame["observation.images.side"] = cv2.resize(side, (self.width, self.height))  # 2nd scene
             self.dataset.add_frame(frame)
             self.frames += 1
         try:
@@ -272,7 +290,7 @@ class SimSession:
         except Exception as e:  # noqa: BLE001 — a flaky (tool-powered) hand drop mustn't crash the loop
             self.hand_ok = False
             self._send_err = str(e)
-        return scene, wrist
+        return scene, wrist, side
 
     def start_episode(self) -> None:
         self._ensure_dataset()
@@ -321,6 +339,19 @@ class SimSession:
             return False
         c.set_block_color(rgba)
         return True
+
+
+def _apply_dark_theme(win) -> None:
+    """Recolor every Tk widget to a dark palette. tk_setPalette applies to existing + future widgets,
+    so calling it right after Tk() themes the whole app (buttons, sliders, entries, menus, dialogs)."""
+    win.tk_setPalette(
+        background="#1e1e1e", foreground="#e0e0e0",
+        activeBackground="#3a3a3a", activeForeground="#ffffff",
+        disabledForeground="#777777", highlightBackground="#1e1e1e",
+        highlightColor="#5a5a5a", insertBackground="#e0e0e0",
+        selectBackground="#3a5f8a", selectForeground="#ffffff",
+        troughColor="#333333",
+    )
 
 
 def _tune_fonts(win) -> None:
@@ -412,7 +443,35 @@ def _maximize(win) -> None:
         pass
 
 
-def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode="sliders", use_videos=False, grasp_mode="pinch", resume=False, hw=None, tool_voltage=TOOL_VOLTAGE) -> None:
+def _crop_black(img: np.ndarray, thr: int = 12) -> np.ndarray:
+    """Trim near-black letterbox/vignette borders so the fisheye circle fills the preview cell.
+
+    Display-only cosmetic crop (recorded frames are untouched). Guards against over-cropping a dark
+    frame: if the content box shrinks below 30% in either axis, keep the original.
+    """
+    g = img.max(axis=2)
+    cols = np.where(g.max(axis=0) > thr)[0]
+    rows = np.where(g.max(axis=1) > thr)[0]
+    if len(cols) and len(rows):
+        c = img[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+        if c.shape[0] >= 0.3 * img.shape[0] and c.shape[1] >= 0.3 * img.shape[1]:
+            return c
+    return img
+
+
+def _compose_row(imgs) -> "np.ndarray | None":
+    """Crop black borders off each frame, match their heights, lay them side by side for the preview."""
+    import cv2
+
+    imgs = [_crop_black(i) for i in imgs if i is not None]
+    if not imgs:
+        return None
+    hh = min(i.shape[0] for i in imgs)
+    imgs = [cv2.resize(i, (max(1, round(i.shape[1] * hh / i.shape[0])), hh)) for i in imgs]
+    return imgs[0] if len(imgs) == 1 else np.hstack(imgs)
+
+
+def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode="sliders", use_videos=False, grasp_mode="pinch", resume=False, hw=None, tool_voltage=TOOL_VOLTAGE, gpu_host="bryan@192.168.11.130", gpu_datasets_dir="~/VLA/outputs/datasets", gpu_sync=True, home_on_save=True) -> None:
     import tkinter as tk
 
     from PIL import Image, ImageTk
@@ -426,7 +485,10 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     # Captured home JOINT config for the deck 'Reset' key (hold-to-home). Persisted across runs.
     import json as _json
     HOME_PATH, HOME_DQ = "outputs/home_pose.json", 0.03  # rad/tick step (~0.36 rad/s at 12 fps)
+    HOME_REACHED_TOL = 0.03    # rad — joints within this of home => auto-return-on-Save is complete
+    HOME_SAVE_MAX_STEPS = 150  # safety cap (~12s @12fps) so a stuck return still saves the episode
     hp = {"q": None}  # mutable holder; Set Home updates it
+    home_save = {"active": False, "steps": 0}  # auto-return-to-home-on-Save state (driven by tick)
     if os.path.exists(HOME_PATH):
         try:
             hp["q"] = _json.load(open(HOME_PATH)).get("q")
@@ -485,6 +547,7 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     sm_msg = _setup_input(input_mode)  # bring up the initial input device
 
     win = tk.Tk()
+    _apply_dark_theme(win)  # global dark palette (buttons/sliders/entries/menus/dialogs)
     _tune_fonts(win)
     win.title(f"UR5e + AmazingHand — teleop ({engine}, {input_mode})")
     win.geometry("760x1020")
@@ -506,7 +569,8 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     scene_cell.grid(row=0, column=0, sticky="nsew")
     img_label = tk.Label(scene_cell, bg="black", borderwidth=0)
     img_label.place(relx=0.5, rely=0.5, anchor="center")
-    tk.Label(scene_cell, text="scene", fg="#888", bg="black").place(x=4, y=2)
+    tk.Label(scene_cell, text="side · scene" if session.has_side else "scene",
+             fg="#888", bg="black").place(x=4, y=2)
     wrist_cell = None
     wrist_label = None
     if session.has_wrist:  # equal-weight second row (uniform) -> both feeds render the same size
@@ -590,13 +654,37 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         d = ctrl._home_rot.inv() * Rotation.from_rotvec(pose[3:6])
         ctrl.roll, ctrl.pitch, ctrl.yaw = (float(a) for a in d.as_euler("xyz"))
 
-    def do_save() -> None:
+    def _finalize_save() -> None:
         import time
+        before = session.episodes
         session.save_episode()
+        if session.episodes == before:  # nothing was recorded -> no save, no upload, no rating
+            return
+        # dataset episode index (0-based) of the episode just saved — correct even when resuming
+        ep_idx = (session.dataset.num_episodes - 1) if session.dataset is not None else session.episodes - 1
         sd["save_flash_until"] = time.time() + 1.5  # flash the deck Save key to confirm
-        log(f"saved episode {session.episodes} -> {session.root}")
+        log(f"saved episode {ep_idx + 1} -> {session.root}")
+        _kick_upload("save")           # auto-upload the dataset to the GPU (background)
+        _enter_rating(ep_idx)          # light up the deck bottom row for a 1-5 star rating
+
+    def do_save() -> None:
+        # Save = auto-return the arm to the captured home JOINT pose (recorded, grasp held) so every
+        # episode ends at the same spot -> the place skill can start from there. tick() drives the
+        # joint-space return and calls _finalize_save() when home is reached. Falls back to an
+        # immediate save if no home is captured or --no-home-on-save is set.
+        if not session.recording or session.frames == 0:
+            return  # nothing recording to save
+        if home_save["active"]:
+            return  # a return is already in progress for this save
+        if hp["q"] is None or not home_on_save:
+            _finalize_save()
+        else:
+            home_save["active"] = True
+            home_save["steps"] = 0
+            log("returning to home (recording)… saves on arrival")
 
     def do_discard() -> None:
+        home_save["active"] = False  # cancel any in-progress auto-home return
         session.discard_episode()
         log("episode discarded")
 
@@ -763,7 +851,7 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     tk.OptionMenu(topinfo, mode_var, "sliders", "spacemouse", "gamepad", "freedrive",
                   command=switch_mode).grid(row=0, column=1, sticky="w")
     tk.Label(topinfo, text="task").grid(row=0, column=2, sticky="e", padx=(12, 4))
-    task_entry = tk.Entry(topinfo, textvariable=task_var, width=22)
+    task_entry = tk.Entry(topinfo, textvariable=task_var, width=44)
     task_entry.grid(row=0, column=3, sticky="w")
     tk.Label(topinfo, textvariable=status, fg="white", anchor="w", width=18).grid(
         row=0, column=4, sticky="ew", padx=(12, 8))
@@ -797,7 +885,8 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     sd_labels = {5: "idx\nopen", 6: "mid\nopen", 7: "rng\nopen", 8: "thb\nopen", 9: "OPEN\nALL",
                  10: "idx\nclose", 11: "mid\nclose", 12: "rng\nclose", 13: "thb\nclose", 14: "CLOSE\nALL"}
     sd = {"pad": None, "queue": _queue.Queue(), "held": {}, "reset_held": False, "prev_mode": "spacemouse",
-          "rec_bg": None, "k1": None, "k2": None, "save_flash_until": 0.0}  # deck key-render state
+          "rec_bg": None, "k1": None, "k2": None, "save_flash_until": 0.0,
+          "rating_until": 0.0, "rating_ep": None}  # deck key-render + star-rating state
     try:
         from .streamdeck import StreamDeckPad
 
@@ -810,6 +899,91 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         log(f"Stream Deck ready ({_pad.key_count} keys, flipped): actions | open row | close row")
     except Exception as e:  # noqa: BLE001 — the panel runs fine without a deck
         log(f"Stream Deck not available ({e})")
+
+    # --- GPU auto-sync + Stream Deck star rating ------------------------------------------------
+    # On Save: rsync the dataset to the GPU in the background AND light up the deck's bottom row as a
+    # 1-5 star rating for the just-saved episode. The rating is written to meta/annotations.json (the
+    # same sidecar the web UI reads) then re-synced, so it lands on the GPU automatically. The stars
+    # clear on a press or after 30 s. Worker threads NEVER touch Tk — they post to upload_q, drained
+    # in tick() -> log() on the main thread.
+    import subprocess as _subprocess
+    import threading as _threading
+    upload_q = _queue.Queue()
+    _upload_lock = _threading.Lock()
+
+    def _kick_upload(reason: str = "") -> None:
+        if not gpu_sync:
+            return
+        root_ = session.root
+        name = os.path.basename(os.path.normpath(root_))
+        dst = f"{gpu_host}:{gpu_datasets_dir.rstrip('/')}/{name}/"
+
+        def worker():
+            with _upload_lock:  # serialize so a save-sync and a rating-sync never race
+                cmd = ["rsync", "-az", "--partial", "--exclude=*.tmp",
+                       "-e", "ssh -o ConnectTimeout=15", root_.rstrip("/") + "/", dst]
+                try:
+                    r = _subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+                    if r.returncode == 0:
+                        upload_q.put(f"GPU sync ✓ {name}" + (f" ({reason})" if reason else ""))
+                    else:
+                        tail = (r.stderr.strip().splitlines() or [f"rc={r.returncode}"])[-1]
+                        upload_q.put(f"GPU sync FAILED [{name}]: {tail[:70]}")
+                except Exception as e:  # noqa: BLE001
+                    upload_q.put(f"GPU sync error [{name}]: {e}")
+
+        _threading.Thread(target=worker, daemon=True).start()
+
+    def _write_rating(root_: str, ep: int, stars: int) -> None:
+        import json
+        p = os.path.join(root_, "meta", "annotations.json")  # sidecar the web UI reads
+        data = {}
+        if os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    data = json.load(f)
+            except Exception:  # noqa: BLE001
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        rec = data.get(str(ep), {})
+        rec["rating"] = int(stars)
+        data[str(ep)] = rec
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        os.replace(tmp, p)  # atomic on POSIX
+
+    def _enter_rating(ep) -> None:
+        pad = sd["pad"]
+        if pad is None or ep is None or ep < 0:
+            return
+        import time
+        sd["rating_ep"] = ep
+        sd["rating_until"] = time.time() + 30.0
+        for i, k in enumerate(RATING_KEYS):  # bottom row: 1..5 stars, left->right
+            pad.set_label(k, f"{i + 1}\n{'★' * (i + 1)}", bg=(70, 55, 10), fg=(245, 210, 60))
+        log(f"rate episode {ep + 1}: press 1-5 on the deck bottom row (30s)…")
+
+    def _exit_rating() -> None:
+        sd["rating_until"] = 0.0
+        sd["rating_ep"] = None
+        if sd["pad"] is not None:
+            for k in RATING_KEYS:  # restore the finger-close labels
+                sd["pad"].set_label(k, sd_labels[k])
+
+    def _apply_rating(stars: int) -> None:
+        ep = sd["rating_ep"]
+        _exit_rating()
+        if ep is None:
+            return
+        try:
+            _write_rating(session.root, ep, stars)
+            log(f"rated episode {ep + 1}: {stars}★")
+            _kick_upload(f"rating {stars}★")  # push the rating to the GPU
+        except Exception as e:  # noqa: BLE001
+            log(f"rating write failed: {e}")
 
     def _toggle_freedrive_key() -> None:
         # deck key 2 when idle: flip between teach mode and the prior driving input
@@ -826,6 +1000,10 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
                 key, down = sd["queue"].get_nowait()
             except _queue.Empty:
                 break
+            if sd["rating_until"] and key in RATING_KEYS:  # rating active -> bottom row = stars
+                if down:
+                    _apply_rating(RATING_KEYS.index(key) + 1)
+                continue
             if key in sd_actions:
                 if down:
                     sd_actions[key]()          # fixed actions (REC / Recon / Quit)
@@ -860,6 +1038,9 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         if pad is None:
             return
         import time
+        if sd["rating_until"] and time.time() > sd["rating_until"]:  # rating window elapsed
+            _exit_rating()
+            log("rating timed out (30s) — deck restored")
         rec = session.recording
         on = int(time.time() * 1.5) % 2 == 0  # ~1.5 Hz blink phase
         rec_bg = ((200, 30, 30) if on else (45, 0, 0)) if rec else (25, 25, 25)
@@ -956,13 +1137,28 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     tickn = {"i": 0}
 
     def tick() -> None:
+        while True:  # surface background GPU-sync results (worker threads can't touch Tk)
+            try:
+                log(upload_q.get_nowait())
+            except _queue.Empty:
+                break
         _pump_streamdeck()  # drain deck key events (actions + per-finger ramp + reset/freedrive keys)
         _update_deck_status()  # dynamic deck labels: REC blink, Save/Reset, Discard/Freedrive
         mode = io["mode"]
+        saving_home = home_save["active"]  # auto-return to home on Save: recorded, grasp held
         # Hold-to-home: deck Reset held while idle -> slow joint-space return to the captured home. Drives
         # the arm directly (servoJ) and re-bases the teleop target so releasing Reset doesn't jump.
-        resetting = sd["reset_held"] and not session.recording and mode != "freedrive" and hp["q"] is not None
-        if resetting:
+        resetting = (not saving_home and sd["reset_held"] and not session.recording
+                     and mode != "freedrive" and hp["q"] is not None)
+        if saving_home:
+            try:
+                session.robot.arm.home_step(hp["q"], HOME_DQ)  # joint-space -> no Cartesian singularity
+                _rebase_ctrl()  # track the teleop target to the arm so resuming stays at home, no jump-back
+            except Exception as e:  # noqa: BLE001 — a sim arm may lack home_step
+                log(f"auto-home unavailable ({e}); saving as-is")
+                home_save["active"] = saving_home = False
+                _finalize_save()
+        elif resetting:
             session.robot.arm.home_step(hp["q"], HOME_DQ)
             _rebase_ctrl()
         elif mode == "gamepad" and io["gp"] is not None:
@@ -973,16 +1169,27 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         elif mode == "freedrive":
             _apply_freedrive_grasp()
         tickn["i"] += 1
-        do_wrist = (tickn["i"] % 2 == 0)  # render wrist preview at half rate when idle
-        if mode == "freedrive":  # arm is hand-guided: the recorded arm action IS the actual pose
+        do_wrist = (tickn["i"] % 2 == 0) or saving_home  # render wrist preview at half rate when idle
+        if saving_home or mode == "freedrive":  # record the arm's ACTUAL pose; grasp held through it
             pose = session.robot.arm.get_ee_pose()
             action_vec = Action(tuple(pose[:6]), ctrl.grasp_curls()).to_vector()
         else:
             action_vec = ctrl.action_vector()
-        scene_img, wrist_img = session.step(
-            action_vec, task_var.get(), record=session.recording, do_wrist=do_wrist,
-            command_arm=(mode != "freedrive") and not resetting,  # during reset, home_step drives the arm
+        scene_img, wrist_img, side_img = session.step(
+            action_vec, task_var.get(), record=session.recording or saving_home, do_wrist=do_wrist,
+            command_arm=(mode != "freedrive") and not resetting and not saving_home,
         )
+        if saving_home:  # keep recording the return until home is reached (or a safety cap), then save
+            home_save["steps"] += 1
+            done = home_save["steps"] >= HOME_SAVE_MAX_STEPS
+            try:
+                q_now = session.robot.arm.get_joint_positions()
+                done = done or max(abs(a - b) for a, b in zip(q_now, hp["q"])) < HOME_REACHED_TOL
+            except Exception:  # noqa: BLE001
+                done = True
+            if done:
+                home_save["active"] = False
+                _finalize_save()
         def _fit(img, cell, label):  # letterbox into the cell; identical logic -> equal display sizes
             pil = Image.fromarray(img)
             cw, ch = cell.winfo_width(), cell.winfo_height()
@@ -994,9 +1201,12 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
             label.configure(image=photo)
             label.image = photo
 
-        _fit(scene_img, scene_cell, img_label)
+        # both 3rd-person scene cams side by side in the top cell (side left, scene right); wrist below.
+        # Crop the black letterbox/vignette borders so the fisheye circles fill the cells (preview only).
+        top_img = _compose_row([side_img, scene_img])
+        _fit(top_img, scene_cell, img_label)
         if wrist_label is not None and wrist_img is not None:
-            _fit(wrist_img, wrist_cell, wrist_label)
+            _fit(_crop_black(wrist_img), wrist_cell, wrist_label)
         if session.recording:
             status.set(f"● REC  episode {session.episodes + 1}  frames={session.frames}")
         if not session.hand_ok:  # a hand send failed mid-loop -> power-cycle the tool + reconnect
@@ -1051,8 +1261,8 @@ def main() -> None:
     ap.add_argument("--root", default="outputs/datasets/manual")
     ap.add_argument("--task", default="put the block on the green pad")
     ap.add_argument("--fps", type=int, default=12)  # ~27ms/render on Mac; 12fps fits 2 cams
-    ap.add_argument("--width", type=int, default=320)
-    ap.add_argument("--height", type=int, default=240)
+    ap.add_argument("--width", type=int, default=960)   # 16:9; cameras capture native 1080p
+    ap.add_argument("--height", type=int, default=540)  # SmolVLA resizes to 512² so 960x540 is ample
     ap.add_argument("--use-videos", action="store_true",
                     help="encode cameras as video, not images (needs system ffmpeg; "
                          "use on the Linux box so training-time loading is fast)")
@@ -1068,18 +1278,31 @@ def main() -> None:
                     "(engine=hardware; default = stable by-id path for the 4K cam)")
     ap.add_argument("--wrist-cam", default=None, help="wrist camera: device index or /dev path "
                     "(engine=hardware; default = stable by-id path for the ARC cam)")
+    ap.add_argument("--side-cam", nargs="?", const=True, default=None,
+                    help="record a 2nd scene camera (occlusion coverage): pass --side-cam alone to use "
+                         "the default port (cameras.SIDE_CAM), or --side-cam <device/path> to override")
     ap.add_argument("--tool-voltage", type=int, default=12, choices=[0, 12, 24],
                     help="UR tool output voltage powering the AmazingHand ESP32 (engine=hardware)")
+    ap.add_argument("--gpu-host", default="bryan@192.168.11.130",
+                    help="rsync target (user@host) for auto-uploading saved episodes to the GPU")
+    ap.add_argument("--gpu-datasets-dir", default="~/VLA/outputs/datasets",
+                    help="datasets dir on the GPU host (the dataset folder syncs under it)")
+    ap.add_argument("--no-gpu-sync", action="store_true",
+                    help="disable auto-upload of saved episodes / ratings to the GPU")
+    ap.add_argument("--no-home-on-save", action="store_true",
+                    help="disable the joint-space auto-return-to-home on Save (save immediately instead)")
     args = ap.parse_args()
 
     if args.selftest:
         selftest()
     else:
         hw = {"robot_ip": args.robot_ip, "hand_host": args.hand_host,
-              "scene_cam": args.scene_cam, "wrist_cam": args.wrist_cam}
+              "scene_cam": args.scene_cam, "wrist_cam": args.wrist_cam, "side_cam": args.side_cam}
         run_gui(args.engine, args.repo_id, args.root, args.task, args.fps, args.width, args.height,
                 input_mode=args.input, use_videos=args.use_videos, grasp_mode=args.grasp,
-                resume=args.resume, hw=hw, tool_voltage=args.tool_voltage)
+                resume=args.resume, hw=hw, tool_voltage=args.tool_voltage,
+                gpu_host=args.gpu_host, gpu_datasets_dir=args.gpu_datasets_dir,
+                gpu_sync=not args.no_gpu_sync, home_on_save=not args.no_home_on_save)
 
 
 if __name__ == "__main__":

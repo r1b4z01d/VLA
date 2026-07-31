@@ -46,7 +46,7 @@ def main() -> None:
     pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
                                          preprocessor_overrides={"device_processor": {"device": args.device}})
 
-    robot, render_fn, wrist_fn = make_engine("mujoco")
+    robot, render_fn, wrist_fn, _side_fn = make_engine("mujoco")
     robot.connect()
     cell = robot.arm.cell
     bqa, gid = cell._block_qadr, cell._goal_geom
