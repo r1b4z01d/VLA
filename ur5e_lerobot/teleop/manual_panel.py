@@ -20,6 +20,7 @@ import os
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from ..robot.workspace import load_workspace_calib
 from ..schema import ACTION_NAMES, ARM_POSE_NAMES, STATE_NAMES, Action
 from ..sim.record_sim import make_engine
 
@@ -28,7 +29,8 @@ SLIDER_ORDER = ("x", "y", "z", "roll", "pitch", "yaw")
 # live pose). Keep this box INSIDE the arm's well-conditioned workspace: driving the target near full
 # extension / a singularity makes servoL oscillate -> the arm jerks. Start the panel with the EE
 # centered over the workspace so a modest box reaches everything. Bump one axis at a time + test.
-POS_DELTAS = {"x": 0.40, "y": 0.40, "z": 0.45}
+# Per-axis overrides from outputs/workspace_calib.json["pos_deltas"] when present (calibrate_workspace.py).
+POS_DELTAS = {**{"x": 0.40, "y": 0.40, "z": 0.45}, **(load_workspace_calib().get("pos_deltas") or {})}
 
 # SpaceMouse teleop gains (per second at full deflection); tune to taste.
 SM_POS_GAIN = 0.131  # m/s  (was 0.175; -25%)
@@ -46,9 +48,9 @@ SM_MAP = {
     "x": ("x", -1),
     "y": ("y", +1),
     "z": ("z", -1),
-    "roll": ("pitch", +1),
+    "roll": ("yaw", -1),
     "pitch": ("roll", -1),
-    "yaw": ("yaw", +1),
+    "yaw": ("pitch", -1),
 }
 
 # Xbox gamepad mapping: robot axis -> (gamepad source, sign). Sources: lx/ly (left stick),
@@ -241,6 +243,7 @@ class SimSession:
                 robot_type=self.robot.name,
                 use_videos=self.use_videos,
             )
+        self._start_writer()  # async image writer -> add_frame doesn't block the teleop loop
 
     def render(self) -> np.ndarray:
         return self._render_fn(self.disp_w, self.disp_h)  # crisp scene for display
@@ -309,13 +312,46 @@ class SimSession:
         self.recording = False
         self.frames = 0
 
+    def _start_writer(self) -> None:
+        """Offload per-frame image (PNG) writes to background threads so add_frame doesn't block the
+        teleop loop. Without this, LeRobot encodes 3x 960x540 PNGs synchronously on the record tick,
+        stalling teleop (idle movement stays smooth because it never adds frames)."""
+        if self.dataset is None:
+            return
+        try:
+            self.dataset.start_image_writer(num_processes=0, num_threads=8)
+        except Exception:  # noqa: BLE001 — recording still works (synchronously) if this fails
+            pass
+
+    def _stop_writer(self) -> None:
+        if self.dataset is not None and getattr(self.dataset, "image_writer", None) is not None:
+            try:
+                self.dataset.stop_image_writer()  # flush pending writes + join threads
+            except Exception:  # noqa: BLE001
+                pass
+
     def finalize(self) -> None:
         """Flush episode metadata + write the parquet footers. MUST run before exit, or the last
         data/episodes parquet is left open (no footer) -> the dataset is corrupt and won't load.
         LeRobot only does this in finalize(); its __del__ closes the data writer but NOT the
         metadata writer, and a hard window close (X) may skip __del__ entirely."""
         if self.dataset is not None:
+            self._stop_writer()
             self.dataset.finalize()
+
+    def checkpoint(self) -> bool:
+        """Finalize the dataset (write meta/episodes footers so it's LOADABLE) then re-open it for
+        continued appending — the same round-trip `--resume` does across launches, but in-process, so
+        a loadable copy exists after every episode without closing the panel. Returns True on success;
+        on failure the live dataset is left recording-capable (best-effort; never crashes the loop)."""
+        if self.dataset is None:
+            return False
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        self._stop_writer()      # flush pending image writes before finalizing
+        self.dataset.finalize()  # writes meta/episodes; also closes the data/meta writers
+        self.dataset = LeRobotDataset(repo_id=self.repo_id, root=self.root)  # re-open to keep appending
+        self._start_writer()     # fresh async writer for the next episode
+        return True
 
     def reset_scene(self) -> None:
         """Reset the whole sim to its start state (arm to home, block back to its spot)."""
@@ -471,7 +507,7 @@ def _compose_row(imgs) -> "np.ndarray | None":
     return imgs[0] if len(imgs) == 1 else np.hstack(imgs)
 
 
-def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode="sliders", use_videos=False, grasp_mode="pinch", resume=False, hw=None, tool_voltage=TOOL_VOLTAGE, gpu_host="bryan@192.168.11.130", gpu_datasets_dir="~/VLA/outputs/datasets", gpu_sync=True, home_on_save=True) -> None:
+def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode="sliders", use_videos=False, grasp_mode="pinch", resume=False, hw=None, tool_voltage=TOOL_VOLTAGE, gpu_host="bryan@192.168.11.130", gpu_datasets_dir="~/VLA/outputs/datasets", gpu_sync=True, home_on_save=True, operator="") -> None:
     import tkinter as tk
 
     from PIL import Image, ImageTk
@@ -569,7 +605,7 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     scene_cell.grid(row=0, column=0, sticky="nsew")
     img_label = tk.Label(scene_cell, bg="black", borderwidth=0)
     img_label.place(relx=0.5, rely=0.5, anchor="center")
-    tk.Label(scene_cell, text="side · scene" if session.has_side else "scene",
+    tk.Label(scene_cell, text="scene · side" if session.has_side else "scene",
              fg="#888", bg="black").place(x=4, y=2)
     wrist_cell = None
     wrist_label = None
@@ -662,9 +698,18 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
             return
         # dataset episode index (0-based) of the episode just saved — correct even when resuming
         ep_idx = (session.dataset.num_episodes - 1) if session.dataset is not None else session.episodes - 1
+        try:
+            session.checkpoint()  # finalize+reopen so the copy that uploads is LOADABLE on the GPU
+        except Exception as e:  # noqa: BLE001 — never let a checkpoint hiccup break recording
+            log(f"checkpoint warning: {e}")
+        if operator:  # tag the episode with the operator so the dataset manager shows it
+            try:
+                _write_annotation(session.root, ep_idx, operator=operator)
+            except Exception as e:  # noqa: BLE001
+                log(f"operator annotation failed: {e}")
         sd["save_flash_until"] = time.time() + 1.5  # flash the deck Save key to confirm
         log(f"saved episode {ep_idx + 1} -> {session.root}")
-        _kick_upload("save")           # auto-upload the dataset to the GPU (background)
+        _kick_upload("save")           # auto-upload the now-LOADABLE dataset to the GPU (background)
         _enter_rating(ep_idx)          # light up the deck bottom row for a 1-5 star rating
 
     def do_save() -> None:
@@ -709,7 +754,10 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
                 sd["pad"].close()  # blank + release the Stream Deck
             if session.recording:
                 session.discard_episode()  # an unfinished (un-Saved) demo -> drop it
-            session.finalize()
+            session.finalize()  # writes meta/episodes footers -> the dataset is now loadable
+            if gpu_sync and session.dataset is not None:  # push the FINALIZED dataset to the GPU
+                print("[close] final GPU sync (finalized dataset)…")
+                print("[close] " + (_rsync_dataset("finalized") or "sync off"))
         except Exception as e:  # noqa: BLE001 — never let cleanup block the window from closing
             print(f"[close] finalize warning: {e}")
         win.destroy()
@@ -911,32 +959,41 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
     upload_q = _queue.Queue()
     _upload_lock = _threading.Lock()
 
-    def _kick_upload(reason: str = "") -> None:
+    def _rsync_dataset(reason: str = "") -> "str | None":
+        """Blocking rsync of the current dataset to the GPU; returns a status line (None if disabled)."""
         if not gpu_sync:
-            return
+            return None
         root_ = session.root
         name = os.path.basename(os.path.normpath(root_))
         dst = f"{gpu_host}:{gpu_datasets_dir.rstrip('/')}/{name}/"
+        cmd = ["rsync", "-az", "--partial", "--exclude=*.tmp",
+               "-e", "ssh -o ConnectTimeout=15", root_.rstrip("/") + "/", dst]
+        try:
+            r = _subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            if r.returncode == 0:
+                return f"GPU sync ✓ {name}" + (f" ({reason})" if reason else "")
+            tail = (r.stderr.strip().splitlines() or [f"rc={r.returncode}"])[-1]
+            return f"GPU sync FAILED [{name}]: {tail[:70]}"
+        except Exception as e:  # noqa: BLE001
+            return f"GPU sync error [{name}]: {e}"
+
+    def _kick_upload(reason: str = "") -> None:
+        if not gpu_sync:
+            return
 
         def worker():
-            with _upload_lock:  # serialize so a save-sync and a rating-sync never race
-                cmd = ["rsync", "-az", "--partial", "--exclude=*.tmp",
-                       "-e", "ssh -o ConnectTimeout=15", root_.rstrip("/") + "/", dst]
-                try:
-                    r = _subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-                    if r.returncode == 0:
-                        upload_q.put(f"GPU sync ✓ {name}" + (f" ({reason})" if reason else ""))
-                    else:
-                        tail = (r.stderr.strip().splitlines() or [f"rc={r.returncode}"])[-1]
-                        upload_q.put(f"GPU sync FAILED [{name}]: {tail[:70]}")
-                except Exception as e:  # noqa: BLE001
-                    upload_q.put(f"GPU sync error [{name}]: {e}")
+            with _upload_lock:  # serialize so uploads never race
+                msg = _rsync_dataset(reason)
+                if msg:
+                    upload_q.put(msg)
 
         _threading.Thread(target=worker, daemon=True).start()
 
-    def _write_rating(root_: str, ep: int, stars: int) -> None:
+    def _write_annotation(root_: str, ep: int, **fields) -> None:
+        """Merge fields (rating / operator / notes) into one episode's record in
+        meta/annotations.json — the exact sidecar the web UI reads. Empty values clear the field."""
         import json
-        p = os.path.join(root_, "meta", "annotations.json")  # sidecar the web UI reads
+        p = os.path.join(root_, "meta", "annotations.json")
         data = {}
         if os.path.isfile(p):
             try:
@@ -947,8 +1004,15 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         if not isinstance(data, dict):
             data = {}
         rec = data.get(str(ep), {})
-        rec["rating"] = int(stars)
-        data[str(ep)] = rec
+        for k, v in fields.items():
+            if v is None or v == "":
+                rec.pop(k, None)
+            else:
+                rec[k] = v
+        if rec:
+            data[str(ep)] = rec
+        else:
+            data.pop(str(ep), None)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         tmp = p + ".tmp"
         with open(tmp, "w") as f:
@@ -979,7 +1043,7 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
         if ep is None:
             return
         try:
-            _write_rating(session.root, ep, stars)
+            _write_annotation(session.root, ep, rating=int(stars))
             log(f"rated episode {ep + 1}: {stars}★")
             _kick_upload(f"rating {stars}★")  # push the rating to the GPU
         except Exception as e:  # noqa: BLE001
@@ -1201,9 +1265,9 @@ def run_gui(engine, repo_id, root, task_default, fps, width, height, input_mode=
             label.configure(image=photo)
             label.image = photo
 
-        # both 3rd-person scene cams side by side in the top cell (side left, scene right); wrist below.
+        # both 3rd-person scene cams side by side in the top cell (scene left, side right); wrist below.
         # Crop the black letterbox/vignette borders so the fisheye circles fill the cells (preview only).
-        top_img = _compose_row([side_img, scene_img])
+        top_img = _compose_row([scene_img, side_img])
         _fit(top_img, scene_cell, img_label)
         if wrist_label is not None and wrist_img is not None:
             _fit(_crop_black(wrist_img), wrist_cell, wrist_label)
@@ -1291,6 +1355,8 @@ def main() -> None:
                     help="disable auto-upload of saved episodes / ratings to the GPU")
     ap.add_argument("--no-home-on-save", action="store_true",
                     help="disable the joint-space auto-return-to-home on Save (save immediately instead)")
+    ap.add_argument("--operator", default="",
+                    help="operator name tagged on every recorded episode (shows in the dataset manager)")
     args = ap.parse_args()
 
     if args.selftest:
@@ -1302,7 +1368,8 @@ def main() -> None:
                 input_mode=args.input, use_videos=args.use_videos, grasp_mode=args.grasp,
                 resume=args.resume, hw=hw, tool_voltage=args.tool_voltage,
                 gpu_host=args.gpu_host, gpu_datasets_dir=args.gpu_datasets_dir,
-                gpu_sync=not args.no_gpu_sync, home_on_save=not args.no_home_on_save)
+                gpu_sync=not args.no_gpu_sync, home_on_save=not args.no_home_on_save,
+                operator=args.operator)
 
 
 if __name__ == "__main__":

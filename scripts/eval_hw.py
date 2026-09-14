@@ -49,10 +49,10 @@ import torch
 
 from lerobot.policies.factory import make_pre_post_processors
 
-from ur5e_lerobot.schema import ACTION_NAMES, STATE_NAMES
+from ur5e_lerobot.schema import ACTION_NAMES, HAND_CURL_DIM, STATE_NAMES
 from ur5e_lerobot.sim.record_sim import make_engine
 
-W, H = 320, 240  # dataset image size (must match training)
+W, H = 960, 540  # dataset image size (must match training)
 TOOL_VOLTAGE = 12  # UR tool output voltage powering the AmazingHand ESP32 (fed from the tool port)
 
 # Stream Deck key assignments (LOGICAL coords; StreamDeckPad flip-remaps to the flipped hardware).
@@ -60,6 +60,7 @@ KEY_PLAY = 0       # top-left
 KEY_FREEDRIVE = 1  # next to play
 KEY_RESET = 2      # reset policy + pause
 KEY_EXIT = 4       # top-right corner (blank key 3 between it and the rest -> hard to hit by accident)
+KEY_OPEN_HAND = 5  # row 2, start — release the grasp (key 3 stays blank as the EXIT guard)
 
 
 def _power_cycle_tool(robot_ip: str, voltage: int = TOOL_VOLTAGE) -> None:
@@ -155,11 +156,13 @@ def _make_control(evq: "queue.Queue"):
         pad.on_key(lambda key, down: evq.put(key) if down else None)
         return pad, f"stream deck ({pad.key_count} keys)"
     except Exception as e:  # noqa: BLE001 — no deck / busy / no HID access -> keyboard
-        print(f"[deck] unavailable ({e}); keyboard: p=play/pause  f=freedrive  r=reset  x=exit  <enter>")
+        print(f"[deck] unavailable ({e}); keyboard: p=play/pause  f=freedrive  r=reset  o=open hand  "
+              f"x=exit  <enter>")
         import sys
         import threading
 
-        keymap = {"p": KEY_PLAY, "f": KEY_FREEDRIVE, "r": KEY_RESET, "x": KEY_EXIT, "q": KEY_EXIT}
+        keymap = {"p": KEY_PLAY, "f": KEY_FREEDRIVE, "r": KEY_RESET, "x": KEY_EXIT, "q": KEY_EXIT,
+                  "o": KEY_OPEN_HAND}
 
         def reader() -> None:
             for line in sys.stdin:
@@ -185,6 +188,7 @@ def _render_deck(pad, mode: str) -> None:
         pad.set_label(KEY_FREEDRIVE, "freedrive\noff", bg=(45, 45, 45))
     pad.set_label(KEY_RESET, "RESET\n+ pause", bg=(150, 110, 20))
     pad.set_label(KEY_EXIT, "EXIT", bg=(70, 70, 70))
+    pad.set_label(KEY_OPEN_HAND, "OPEN\nhand", bg=(20, 110, 110))
 
 
 def _rotvec_angle_deg(a, b) -> float:
@@ -216,20 +220,42 @@ def main() -> None:
     ap.add_argument("--tool-voltage", type=int, default=TOOL_VOLTAGE, choices=[0, 12, 24],
                     help="UR tool output voltage powering the hand; used only if the first connect fails")
     ap.add_argument("--video", action="store_true", help="record the played rollout (scene) to an MP4")
-    ap.add_argument("--video-out", default="outputs/eval_hw.mp4")
+    ap.add_argument("--video-out", default=None,
+                    help="default: <run-dir>/rollout.mp4 — see --run-dir")
     ap.add_argument("--n-action-steps", type=int, default=None,
                     help="override the action-chunk execution horizon (ACT chunk=100, SmolVLA=50; both "
                          "fully open-loop by default). Try 8-16 for closed-loop; lower = more reactive.")
     ap.add_argument("--temporal-ensemble", type=float, default=None, metavar="COEFF",
                     help="ACT-only: temporal ensembling (e.g. 0.01); forces n_action_steps=1 (re-observe "
                          "every step). Takes precedence over --n-action-steps; ignored for SmolVLA.")
-    ap.add_argument("--log-csv", default="outputs/eval_hw_log.csv",
-                    help="per-step diagnostics CSV (pose deltas, clamp, loop/inference timing)")
+    ap.add_argument("--log-csv", default=None,
+                    help="default: <run-dir>/steps.csv — see --run-dir")
+    ap.add_argument("--run-dir", default=None,
+                    help="where this run's artifacts go (default: outputs/eval_runs/<timestamp>_<task>). "
+                         "Every run gets its OWN directory so a new run can never overwrite the last "
+                         "one's telemetry; pass a path to pin it.")
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
     ap.add_argument("--ik-mode", choices=["servoL", "dls"], default="dls",
                     help="arm IK: 'dls' (Python DLS+servoJ, singularity-robust — avoids the "
                          "get_inverse_kin fault) or 'servoL' (proven Cartesian path, can fault near singularities)")
     args = ap.parse_args()
+
+    # Per-run artifact directory. The old defaults were fixed paths opened with "w", so every launch
+    # truncated the previous run's telemetry — a run you wanted to analyse was routinely destroyed by
+    # the next one starting (and a run that never pressed PLAY left only a header behind).
+    if args.run_dir is None:
+        slug = "".join(c if c.isalnum() else "-" for c in (args.task or "eval")).strip("-")[:40]
+        args.run_dir = os.path.join("outputs", "eval_runs",
+                                    f"{time.strftime('%Y%m%d_%H%M%S')}_{slug or 'eval'}")
+    os.makedirs(args.run_dir, exist_ok=True)
+    if args.log_csv is None:
+        args.log_csv = os.path.join(args.run_dir, "steps.csv")
+    if args.video_out is None:
+        args.video_out = os.path.join(args.run_dir, "rollout.mp4")
+    with open(os.path.join(args.run_dir, "run.json"), "w") as _f:
+        json.dump({"started": time.time(), "started_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   "args": vars(args)}, _f, indent=2, sort_keys=True, default=str)
+    print(f"[run] artifacts -> {args.run_dir}")
 
     remote_client = None
     policy = pre = post = None
@@ -249,8 +275,10 @@ def main() -> None:
         _set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
         policy.reset()
 
-    # side_fn ignored until a 3-cam policy is trained (then wire it through remote.py + infer_server too)
-    robot, scene_fn, wrist_fn, _side_fn = make_engine("hardware", robot_ip=args.robot_ip, hand_host=args.hand_host)
+    # 3rd-person 'side' cam included so a 3-cam policy (scene/wrist/side) gets all its inputs; the
+    # bridge (remote.py) + server (infer_server.py) carry whatever image set the policy expects.
+    robot, scene_fn, wrist_fn, side_fn = make_engine("hardware", robot_ip=args.robot_ip,
+                                                     hand_host=args.hand_host, side_cam=True)
     _connect_with_hand_power(robot, args.robot_ip, args.tool_voltage)
     arm = getattr(robot, "arm", None)  # RtdeArmInterface — has start/stop_freedrive on hardware
     if arm is not None and hasattr(arm, "ik_mode"):
@@ -260,23 +288,23 @@ def main() -> None:
     def chw(img):  # RGB HWC uint8 -> [1,3,H,W] float in [0,1] (preprocessor handles the rest)
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float().div(255)[None]
 
-    def observe():  # raw pieces, consumed by either the local or remote infer()
+    def observe():  # read each camera at the dataset size (W,H) so it matches how training recorded
         o = robot.get_observation()
         state = np.array([o[n] for n in STATE_NAMES], dtype=np.float32)
-        return state, scene_fn(640, 480), wrist_fn(640, 480)
+        imgs = {"scene": scene_fn(W, H), "wrist": wrist_fn(W, H), "side": side_fn(W, H)}
+        return state, imgs
 
     if remote_client is not None:
-        def infer(state, scene, wrist):  # ship the obs to the GPU server, get one action back
-            return remote_client.infer(state, cv2.resize(scene, (W, H)), cv2.resize(wrist, (W, H)), args.task)
+        def infer(state, imgs):  # ship the obs to the GPU server, get one action back
+            return remote_client.infer(state, imgs, args.task)
 
         def reset_policy():
             remote_client.reset()
     else:
-        def infer(state, scene, wrist):
-            obs = {"observation.state": torch.from_numpy(state)[None],
-                   "observation.images.scene": chw(cv2.resize(scene, (W, H))),
-                   "observation.images.wrist": chw(cv2.resize(wrist, (W, H))),
-                   "task": [args.task]}
+        def infer(state, imgs):
+            obs = {"observation.state": torch.from_numpy(state)[None], "task": [args.task]}
+            for name, img in imgs.items():
+                obs[f"observation.images.{name}"] = chw(img)
             with torch.no_grad():
                 return post(policy.select_action(pre(obs)))[0].cpu().numpy()
 
@@ -285,7 +313,7 @@ def main() -> None:
 
     writer = None
     if args.video:
-        writer = cv2.VideoWriter(args.video_out, cv2.VideoWriter_fourcc(*"mp4v"), float(args.fps), (640, 480))
+        writer = cv2.VideoWriter(args.video_out, cv2.VideoWriter_fourcc(*"mp4v"), float(args.fps), (W, H))
 
     evq: "queue.Queue[int]" = queue.Queue()
     pad, ctrl = _make_control(evq)
@@ -323,6 +351,18 @@ def main() -> None:
             except Exception as e:  # noqa: BLE001
                 print(f"[freedrive] start failed: {e} (try PAUSE first, or Reconnect the UR)")
 
+    def open_hand() -> None:
+        """Release the grasp. PAUSES first if playing — the policy commands curls every step, so an
+        open issued mid-run would be overwritten on the very next action and look like a dead key."""
+        if st["mode"] == "playing":
+            set_mode("paused")
+            print("[hand] paused so the open isn't overwritten by the next policy action")
+        try:
+            robot.hand.send_curls([0.0] * HAND_CURL_DIM)
+            print("[hand] opened")
+        except Exception as e:  # noqa: BLE001 — a hand fault must not kill the eval loop
+            print(f"[hand] open failed: {e}")
+
     def do_reset() -> None:
         """Reset the policy's internal state and PAUSE (arm holds where it is). Use to abort a run and
         start clean — then FREEDRIVE to reposition and PLAY again."""
@@ -359,6 +399,8 @@ def main() -> None:
                         toggle_freedrive()
                     elif key == KEY_RESET:
                         do_reset()
+                    elif key == KEY_OPEN_HAND:
+                        open_hand()
             except queue.Empty:
                 pass
             if st["exit"]:
@@ -378,9 +420,9 @@ def main() -> None:
                     print("  paused. clear the e-stop if engaged, FREEDRIVE to a safe pose, then PLAY.")
                     continue
                 t0 = time.time()
-                state, scene, wrist = observe()
+                state, imgs = observe()
                 t_obs = time.time()
-                act = infer(state, scene, wrist)
+                act = infer(state, imgs)
                 t_inf = time.time()
                 robot.send_action(dict(zip(ACTION_NAMES, act)))
                 t_snd = time.time()
@@ -406,7 +448,7 @@ def main() -> None:
                 except Exception as e:  # noqa: BLE001
                     print(f"[log] {e}")
                 if writer is not None:
-                    f = cv2.cvtColor(scene, cv2.COLOR_RGB2BGR)
+                    f = cv2.cvtColor(imgs["scene"], cv2.COLOR_RGB2BGR)
                     cv2.putText(f, f"t{st['played']}", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     writer.write(f)
                 st["played"] += 1
@@ -422,6 +464,7 @@ def main() -> None:
         try:
             log_f.close()
             print(f"wrote {args.log_csv} ({st['played']} steps logged)")
+            print(f"[run] artifacts in {args.run_dir}")
         except Exception:  # noqa: BLE001
             pass
         if pad is not None:
