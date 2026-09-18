@@ -22,22 +22,24 @@ import numpy as np
 # by USB-PORT path (stable per physical port; keep each camera in its port). Verify with
 # `ls -l /dev/v4l/by-path/*video-index0`, and grab a frame per port to confirm which is which.
 _BYPATH = "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:{}:1.0-video-index0"
-SCENE_CAM = _BYPATH.format("7.3")   # 3rd-person scene (port 0:7.3)
-WRIST_CAM = _BYPATH.format("5")     # eye-in-hand      (port 0:5)
-SIDE_CAM = _BYPATH.format("8.4")    # 2nd 3rd-person   (port 0:8.4)
+# Re-identified 2026-09-09 after a re-cabling moved all three off their original ports (confirmed via
+# lens-cover test + content inspection over the port5/port6 pair — see chat history, not a doc).
+SCENE_CAM = _BYPATH.format("5")     # 3rd-person scene (port 0:5)  — "left eye", robot's right side
+WRIST_CAM = _BYPATH.format("2")     # eye-in-hand      (port 0:2)
+SIDE_CAM = _BYPATH.format("6")      # 2nd 3rd-person   (port 0:6)  — "right eye", robot's left side
 
 # Per-camera mount orientation, clockwise degrees (0/90/180/270). Adjust after mounting by watching the
 # live panel — the scene/side cams currently look rotated ~90°, so these likely need 90 or 270.
-SCENE_ROTATE = 90    # scene (0:7.3): mounted sideways -> 90° clockwise to upright
+SCENE_ROTATE = 270   # scene (port 0:5): came out upside-down at 90 -> flipped 180 to 270
 WRIST_ROTATE = 0
-SIDE_ROTATE = 270    # side (0:8.4): mounted sideways -> 90° anti-clockwise to upright
+SIDE_ROTATE = 90     # side (port 0:6): came out upside-down at 270 -> flipped 180 to 90
 
-# Per-camera GAIN to lift brightness in dim light (auto-exposure stays ON; None = camera default).
-# The wide-FOV MJPG mode under-exposes badly (mean ~29/255); ~128 roughly doubles it. Tune live in the
-# panel. NOTE: gain adds noise — the real fix for near-black views is workspace LIGHTING, not gain.
-SCENE_GAIN = 128
-WRIST_GAIN = 128
-SIDE_GAIN = 128
+# Per-camera GAIN (V4L2). None = camera default / let auto-exposure meter — correct with adequate
+# workspace lighting (a forced gain on TOP of auto-exposure overexposes). Only raise these if the
+# scene is genuinely dim; the real fix for a dark view is lighting, not gain (which also adds noise).
+SCENE_GAIN = None
+WRIST_GAIN = None
+SIDE_GAIN = None
 
 
 def _fit_pad(rgb: np.ndarray, w: int, h: int) -> np.ndarray:

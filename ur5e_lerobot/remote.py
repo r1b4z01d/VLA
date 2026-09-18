@@ -43,19 +43,49 @@ def recv_msg(sock):
     return pickle.loads(_recv_all(sock, n))
 
 
-def encode_obs(state, scene_rgb, wrist_rgb, task: str) -> dict:
-    """Pack an observation into wire types: state->list, images->JPEG bytes (encode/decode round-trips
-    the array channel-for-channel regardless of RGB/BGR interpretation, so no color swap)."""
+# Downscale before the wire. The policy fits every image into `resize_imgs_with_padding` (512x512 for
+# SmolVLA) preserving aspect, so anything larger is bytes we pay for and the policy immediately throws
+# away. Shrinking to the SAME fit-inside-512 box the policy would produce keeps geometry identical
+# (960x540 -> 512x288, then the policy pads to 512x512 exactly as before) while roughly halving the
+# payload — measured 222 KB -> ~100 KB per 3-camera observation.
+# NB this must stay a FIT (aspect-preserving, shrink-only). Resizing to a square 512x512 would squish
+# rotated/portrait views and silently break train/deploy geometry.
+WIRE_MAX_WH = 512
+JPEG_QUALITY = 92  # unchanged from before the downscale — lower it separately if you want more savings
+
+
+def _fit_for_wire(a, max_wh: int = WIRE_MAX_WH):
+    """Shrink `a` to fit inside (max_wh, max_wh) preserving aspect. Never upscales."""
+    import cv2
+
+    h, w = a.shape[:2]
+    scale = min(max_wh / w, max_wh / h)
+    if scale >= 1.0:
+        return a
+    return cv2.resize(a, (max(1, round(w * scale)), max(1, round(h * scale))),
+                      interpolation=cv2.INTER_AREA)
+
+
+def encode_obs(state, images: dict, task: str, max_wh: int = WIRE_MAX_WH,
+               quality: int = JPEG_QUALITY) -> dict:
+    """Pack an observation into wire types: state->list, images->{name: JPEG bytes}. `images` maps a
+    camera name (scene/wrist/side/…) to an RGB HWC array — whatever set the trained policy expects.
+    JPEG round-trips the array channel-for-channel regardless of RGB/BGR interpretation (no swap).
+
+    Images are shrunk to fit inside (max_wh, max_wh) first — see WIRE_MAX_WH. Pass max_wh=0 to disable
+    (send at capture size) if a policy ever wants more resolution than it resizes to."""
     import cv2
 
     def jpg(a) -> bytes:
-        ok, buf = cv2.imencode(".jpg", a, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if max_wh:
+            a = _fit_for_wire(a, max_wh)
+        ok, buf = cv2.imencode(".jpg", a, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if not ok:
             raise RuntimeError("jpeg encode failed")
         return buf.tobytes()
 
     return {"state": [float(v) for v in state], "task": task,
-            "scene": jpg(scene_rgb), "wrist": jpg(wrist_rgb)}
+            "images": {name: jpg(rgb) for name, rgb in images.items()}}
 
 
 def decode_obs(msg: dict):
@@ -65,7 +95,8 @@ def decode_obs(msg: dict):
     def unjpg(b):
         return cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
 
-    return (np.asarray(msg["state"], dtype=np.float32), unjpg(msg["scene"]), unjpg(msg["wrist"]), msg["task"])
+    return (np.asarray(msg["state"], dtype=np.float32),
+            {name: unjpg(b) for name, b in msg["images"].items()}, msg["task"])
 
 
 class RemotePolicyClient:
@@ -81,10 +112,10 @@ class RemotePolicyClient:
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return self
 
-    def infer(self, state, scene_rgb, wrist_rgb, task: str):
+    def infer(self, state, images: dict, task: str):
         import numpy as np
 
-        send_msg(self.sock, encode_obs(state, scene_rgb, wrist_rgb, task))
+        send_msg(self.sock, encode_obs(state, images, task))
         resp = recv_msg(self.sock)
         if "error" in resp:
             raise RuntimeError(f"remote policy error: {resp['error']}")
@@ -105,8 +136,9 @@ class RemotePolicyClient:
 
 
 def serve(host: str, port: int, infer_fn, reset_fn=None) -> None:
-    """Blocking single-client server. `infer_fn(state, scene_rgb, wrist_rgb, task) -> action` (array or
-    list). Handles a {'cmd':'reset'} control message and survives client reconnects."""
+    """Blocking single-client server. `infer_fn(state, images: dict, task) -> action` (array or list),
+    where `images` maps camera name -> RGB array. Handles a {'cmd':'reset'} control message and survives
+    client reconnects."""
     import numpy as np
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -126,9 +158,9 @@ def serve(host: str, port: int, infer_fn, reset_fn=None) -> None:
                         reset_fn()
                     send_msg(conn, {"ok": True})
                     continue
-                state, scene, wrist, task = decode_obs(msg)
+                state, images, task = decode_obs(msg)
                 try:
-                    action = infer_fn(state, scene, wrist, task)
+                    action = infer_fn(state, images, task)
                     send_msg(conn, {"action": [float(v) for v in np.asarray(action).ravel()]})
                 except Exception as e:  # noqa: BLE001 — report inference errors to the client, keep serving
                     send_msg(conn, {"error": repr(e)})
