@@ -235,6 +235,9 @@ def main() -> None:
                          "Every run gets its OWN directory so a new run can never overwrite the last "
                          "one's telemetry; pass a path to pin it.")
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
+    ap.add_argument("--obs-warn-ms", type=float, default=50.0,
+                    help="print a [obs] SLOW line naming any observation source that took longer than "
+                         "this (arm state / scene / wrist / side). Normal is ~4-13ms each.")
     ap.add_argument("--ik-mode", choices=["servoL", "dls"], default="dls",
                     help="arm IK: 'dls' (Python DLS+servoJ, singularity-robust — avoids the "
                          "get_inverse_kin fault) or 'servoL' (proven Cartesian path, can fault near singularities)")
@@ -288,10 +291,25 @@ def main() -> None:
     def chw(img):  # RGB HWC uint8 -> [1,3,H,W] float in [0,1] (preprocessor handles the rest)
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float().div(255)[None]
 
+    # Cameras are read SEQUENTIALLY, so the slowest one gates the whole observation — and obs_ms used
+    # to be a single number covering arm state + all three reads, which hid WHICH source stalled.
+    # Runs regularly show obs_ms spiking to ~7 s (against an ~85 ms loop); these per-source timings are
+    # what identifies the culprit. `last_obs_ms` is read by the logger after each observe().
+    last_obs_ms = {"state": 0.0, "scene": 0.0, "wrist": 0.0, "side": 0.0}
+
     def observe():  # read each camera at the dataset size (W,H) so it matches how training recorded
+        t = time.time()
         o = robot.get_observation()
         state = np.array([o[n] for n in STATE_NAMES], dtype=np.float32)
-        imgs = {"scene": scene_fn(W, H), "wrist": wrist_fn(W, H), "side": side_fn(W, H)}
+        last_obs_ms["state"] = (time.time() - t) * 1000
+
+        imgs = {}
+        for name, fn in (("scene", scene_fn), ("wrist", wrist_fn), ("side", side_fn)):
+            if fn is None:
+                continue
+            t = time.time()
+            imgs[name] = fn(W, H)
+            last_obs_ms[name] = (time.time() - t) * 1000
         return state, imgs
 
     if remote_client is not None:
@@ -377,9 +395,20 @@ def main() -> None:
     dt = 1.0 / args.fps
     max_step = getattr(arm, "max_step", 0.05)  # translation clamp (m); NB orientation is NOT clamped
     prev = {"tgt": None, "t_end": None}
+    # Connect the cameras NOW, not on the first read. make_engine hands back lazy grabbers, and
+    # UsbCamera.connect() costs ~2.25 s each (VideoCapture open + 15 auto-exposure warm-up frames) —
+    # ~6.9 s for three. Left lazy, that lands inside the first control step: the operator presses PLAY,
+    # the arm sits still for seven seconds, then moves. Pay it here, while paused, instead.
+    print("[cam] connecting cameras (~7s: VideoCapture open + auto-exposure warm-up)…", flush=True)
+    _t_cam = time.time()
+    observe()
+    print(f"[cam] ready in {time.time() - _t_cam:.1f}s — " +
+          "  ".join(f"{k}={v:.0f}ms" for k, v in last_obs_ms.items() if v), flush=True)
+
     log_f = open(args.log_csv, "w", newline="")
     log_w = csv.writer(log_f)
-    log_w.writerow(["t", "loop_ms", "obs_ms", "infer_ms", "send_ms", "d_move_mm", "d_turn_deg",
+    log_w.writerow(["t", "loop_ms", "obs_ms", "state_ms", "scene_ms", "wrist_ms", "side_ms",
+                    "infer_ms", "send_ms", "d_move_mm", "d_turn_deg",
                     "cmd_dmove_mm", "cmd_dturn_deg", "clamp_trans",
                     "cur_x", "cur_y", "cur_z", "cur_rx", "cur_ry", "cur_rz",
                     "tgt_x", "tgt_y", "tgt_z", "tgt_rx", "tgt_ry", "tgt_rz",
@@ -435,11 +464,18 @@ def main() -> None:
                     clamp = int(d_move > max_step * 1000.0)  # translation clamp engaged this step?
                     loop_ms = (t_snd - prev["t_end"]) * 1000.0 if prev["t_end"] is not None else 0.0
                     log_w.writerow([st["played"], round(loop_ms, 1), round((t_obs - t0) * 1000, 1),
+                                    round(last_obs_ms["state"], 1), round(last_obs_ms["scene"], 1),
+                                    round(last_obs_ms["wrist"], 1), round(last_obs_ms["side"], 1),
                                     round((t_inf - t_obs) * 1000, 1), round((t_snd - t_inf) * 1000, 1),
                                     round(d_move, 1), round(d_turn, 1), round(d_cmd_m, 1), round(d_cmd_r, 1), clamp,
                                     *[round(float(v), 4) for v in cur], *[round(float(v), 4) for v in tgt],
                                     *[round(float(v), 3) for v in act[6:10]]])
                     log_f.flush()
+                    # Name the culprit the moment a source stalls, instead of only in the CSV later.
+                    slow = {k: v for k, v in last_obs_ms.items() if v > args.obs_warn_ms}
+                    if slow:
+                        print("  [obs] SLOW: " + "  ".join(f"{k}={v:.0f}ms" for k, v in
+                                                           sorted(slow.items(), key=lambda kv: -kv[1])))
                     if st["played"] % max(1, args.log_every) == 0:
                         print(f"t{st['played']:<4} loop={loop_ms:4.0f}ms inf={(t_inf - t_obs) * 1000:4.0f}ms "
                               f"Δmove={d_move:5.1f}mm Δturn={d_turn:5.1f}° cmdΔturn={d_cmd_r:5.1f}° "
