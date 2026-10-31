@@ -3,18 +3,27 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RobotDisco Dataset Manager</title>
+  <title>Robot Disco V4</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header>
     <nav class="views" id="view-nav">
+      <button class="nav-btn" data-view="map">Map</button>
+      <button class="nav-btn" data-view="routes">Routes</button>
+      <button class="nav-btn" data-view="robot">RobotDisco Teleop</button>
       <button class="nav-btn active" data-view="datasets">Datasets</button>
       <button class="nav-btn" data-view="models">Models</button>
       <button class="nav-btn" data-view="evals">Evals</button>
+      <button class="nav-btn" data-view="services">Services</button>
     </nav>
-    <div class="brand">RobotDisco <span>VLA</span> Manager</div>
+    <div class="brand">Robot Disco <span>V4</span></div>
     <div class="hdr-right">
+      <span id="hdr-robot" class="hdr-robot" hidden>
+        <span id="robot-status" class="mono muted">—</span>
+        <input id="robot-url" class="robot-url mono" placeholder="http://192.168.11.80:8090/" title="robot page URL (Enter to apply)">
+      </span>
       <span id="monitor" class="monitor" title="folder monitor">monitoring…</span>
       <span id="datasets-dir" class="muted mono"></span>
       <button id="btn-refresh" class="btn">↻ Refresh</button>
@@ -60,6 +69,8 @@
               <th class="c-len">frames</th>
               <th class="c-len">dur</th>
               <th class="c-rate">rating</th>
+              <th class="c-num" title="grasp attempts: 1 plus each re-grasp flagged during recording">grasps</th>
+              <th class="c-num" title="exposure locked at launch (100us units, per camera)">expo</th>
               <th>notes</th>
               <th class="c-op">operator</th>
               <th class="c-act">actions</th>
@@ -109,11 +120,78 @@
           <div class="row-actions">
             <button id="btn-eval-new" class="btn">+ New eval</button>
             <button id="btn-evals-refresh" class="btn">↻ Refresh</button>
+            <label class="muted auto-lbl" title="re-read the registry every 15 s (runs uploaded by the eval appear as they finish)"><input type="checkbox" id="evals-auto" checked> live</label>
           </div>
         </div>
         <div id="evals-wrap" class="cards-list"></div>
       </section>
     </div><!-- /view-evals -->
+
+    <!-- ===== Services: the robot PC's supervisor units (its :9999 page, native) ===== -->
+    <div id="view-services" class="view" hidden>
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Services</h2>
+          <div class="row-actions">
+            <span id="services-status" class="mono muted">—</span>
+            <button id="btn-restart-base" class="btn" title="base launch, then localization, navigation, collision monitor, each given time to settle — the order that keeps every node bound to live publishers">↻ Restart base stack (ordered)</button>
+            <button id="btn-services-refresh" class="btn">↻ Refresh</button>
+            <a id="services-open" class="muted" href="#" target="_blank" title="supervisor's own page">↗</a>
+          </div>
+        </div>
+        <div id="services-job" class="mono muted svc-job" hidden></div>
+        <div id="services-wrap" class="svc-wrap"></div>
+      </section>
+    </div><!-- /view-services -->
+
+    <!-- ===== Robot view: the teleop panel / eval page served by the robot PC, embedded ===== -->
+    <div id="view-robot" class="view" hidden>
+      <section class="panel grow robot-view">
+        <iframe id="robot-frame" class="robot-frame" title="robot page" allow="fullscreen"></iframe>
+        <div id="robot-hint" class="robot-hint muted" hidden>
+          Nothing is serving the robot page. Start <b>vla_teleop</b> or <b>vla_eval</b> on the robot PC's supervisor
+          (<a href="http://192.168.11.80:9999/" target="_blank">http://192.168.11.80:9999/</a>, or <code>sudo supervisorctl start vla_teleop</code>);
+          their arguments are in <code>~/VLA/config/teleop.env</code> and <code>eval.env</code>. This tab connects by itself once the page is up.
+        </div>
+      </section>
+    </div><!-- /view-robot -->
+
+    <!-- ===== Routes view: the route editor served by the robot PC (map + live pose + waypoints), embedded ===== -->
+    <div id="view-routes" class="view" hidden>
+      <section class="panel grow robot-view">
+        <div class="routes-bar">
+          <span id="route-status" class="mono muted">—</span>
+          <input id="route-url" class="robot-url mono" placeholder="http://192.168.11.80:8092/" title="route editor URL (Enter to apply)">
+          <a id="route-open" class="muted" href="#" target="_blank" title="open the editor in its own tab">↗</a>
+        </div>
+        <iframe id="route-frame" class="robot-frame" title="route editor" allow="fullscreen"></iframe>
+        <div id="route-hint" class="robot-hint muted" hidden>
+          The route editor is not answering. It is the supervisor unit <b>robot_disco_route_editor</b> on the robot PC
+          (<a href="http://192.168.11.80:9999/" target="_blank">http://192.168.11.80:9999/</a>, or <code>sudo supervisorctl start robot_disco_route_editor</code>),
+          serving <code>rd_ws/Scripts/route_editor.py</code> on port 8092. This tab connects by itself once it is up.
+        </div>
+      </section>
+    </div><!-- /view-routes -->
+
+    <!-- ===== Map view: the robot's map page (map + robot + lidar scans), the route editor in map mode ===== -->
+    <div id="view-map" class="view" hidden>
+      <section class="panel grow robot-view">
+        <div class="routes-bar">
+          <span class="source-switch" title="which map this tab shows: the robot's, or a simulation — choosing sim starts route_editor.py --sim on the computer running this manager">
+            <label><input type="radio" name="map-source" value="live"> live</label>
+            <label><input type="radio" name="map-source" value="sim"> sim</label>
+          </span>
+          <span id="map-status" class="mono muted">—</span>
+          <a id="map-open" class="muted" href="#" target="_blank" title="open in its own tab">↗</a>
+        </div>
+        <iframe id="map-frame" class="robot-frame" title="map" allow="fullscreen"></iframe>
+        <div id="map-hint" class="robot-hint muted" hidden>
+          The map page is the route editor in map mode: supervisor unit <b>robot_disco_route_editor</b> on the robot PC
+          (<a href="http://192.168.11.80:9999/" target="_blank">http://192.168.11.80:9999/</a>). This tab connects by itself once it is up.
+        </div>
+      </section>
+    </div><!-- /view-map -->
+
   </main>
 
   <div id="toast" class="toast" hidden></div>

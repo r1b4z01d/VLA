@@ -33,6 +33,11 @@ header {
 }
 .brand { justify-self: center; text-align: center; white-space: nowrap; font-weight: 700; letter-spacing: .5px; }
 .brand span { color: var(--accent); font-weight: 500; }
+.source-switch { margin-right: 14px; font-weight: 500; font-size: 12px; display: inline-flex; gap: 10px; align-items: center; }
+.source-switch label { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.source-switch label:has(input:checked) { color: var(--fg); }
+.source-switch label:has(input[value="sim"]:checked) { color: #ffb347; }
+.source-switch input { accent-color: var(--accent); margin: 0; }
 .hdr-right { justify-self: end; display: flex; align-items: center; gap: 12px; min-width: 0; }
 .monitor { font-size: 12px; color: var(--muted); padding: 2px 6px; border-radius: 4px; }
 .monitor.changed { color: #101012; background: var(--accent); border-color: var(--accent); }
@@ -70,7 +75,19 @@ nav.views { justify-self: start; display: flex; gap: 4px; }
 .card-foot .stars { font-size: 15px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .panel-head h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
-.row-actions { display: flex; gap: 6px; }
+.row-actions { display: flex; gap: 6px; align-items: center; }
+.auto-lbl { font-size: 12px; display: flex; align-items: center; gap: 4px; }
+.robot-view { padding: 0; }
+.hdr-robot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hdr-robot[hidden], #monitor[hidden], #datasets-dir[hidden], #btn-refresh[hidden] { display: none; }
+.robot-frame { flex: 1; width: 100%; min-height: 70vh; border: 0; background: #000; }
+.robot-url { width: 260px; background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+.robot-hint { padding: 16px; font-size: 13px; }
+.routes-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.routes-bar a { text-decoration: none; font-size: 14px; }
+#route-status.ok, #map-status.ok { color: #9fe3a6; }
+.robot-hint code { display: block; margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--fg); white-space: pre-wrap; }
+#robot-status.ok { color: #9fe3a6; }
 
 /* collapse toggles */
 .btn.icon { padding: 4px 9px; font-weight: 700; line-height: 1; }
@@ -119,6 +136,12 @@ tbody tr.playing { background: rgba(47,179,201,.12); }
 .c-len { width: 56px; }
 .c-rate { width: 96px; }
 .c-op { width: 120px; }
+.c-num { width: 64px; text-align: center; }
+/* grasp count >1: present-but-notable, so recovery episodes stand out when scanning */
+.tag.warn {
+  display: inline-block; min-width: 18px; padding: 1px 6px; border-radius: 9px;
+  background: #5a3d12; color: #f0c674; font-family: var(--mono); font-size: 12px;
+}
 .c-act { width: 210px; white-space: nowrap; }
 .ep-input { width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--fg); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
 .ep-input:focus { outline: none; border-color: var(--accent); }
@@ -149,3 +172,35 @@ tbody tr.playing { background: rgba(47,179,201,.12); }
 .modal input, .modal select { width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; }
 .modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .modal .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* evals grouped by model: header carries the combined rating; body holds the run cards */
+.eval-group { margin: 10px 0 14px; border: 1px solid var(--border, #333); border-radius: 8px; overflow: hidden; }
+.eval-group-head { display: flex; align-items: center; gap: 12px; padding: 8px 12px; cursor: pointer; background: rgba(255,255,255,0.04); user-select: none; }
+.eval-group-head:hover { background: rgba(255,255,255,0.07); }
+.eval-group.collapsed .eval-group-head { border-bottom: none; }
+.group-toggle { width: 1em; color: var(--muted); }
+.group-title { font-weight: 600; font-family: var(--mono); }
+.group-rating { color: #f5c542; letter-spacing: 1px; }
+.group-rating b { color: inherit; margin-left: 4px; font-family: var(--mono); }
+.group-stats { color: var(--muted); font-size: 12px; margin-left: auto; }
+.eval-group-body { padding: 6px 10px 2px; }
+.eval-group-body .card { margin: 6px 0; }
+
+/* Services tab */
+.svc-wrap { overflow: auto; padding: 8px 12px; }
+table.svc { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.svc th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+table.svc td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.svc tr.svc-row:hover td { background: var(--panel-2); }
+table.svc td.name { font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: nowrap; }
+.badge-status.running { background: var(--ok); color: #fff; }
+.badge-status.starting, .badge-status.stopping, .badge-status.backoff { background: #c89a2b; color: #1a1400; }
+.badge-status.fatal, .badge-status.exited { background: var(--danger); color: #fff; }
+.badge-status.unknown { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+table.svc .acts { white-space: nowrap; }
+table.svc .acts .btn { padding: 3px 8px; font-size: 12px; margin-right: 4px; }
+table.svc tr.svc-log td { background: #0f1115; padding: 0; }
+table.svc pre.svc-log { margin: 0; padding: 8px 12px; max-height: 320px; overflow: auto; font-size: 11px; line-height: 1.4; color: #c8ccd6; white-space: pre-wrap; }
+.svc-logbar { display: flex; gap: 8px; align-items: center; padding: 4px 12px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.svc-job { padding: 6px 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.svc-job.on { color: #ffb347; }

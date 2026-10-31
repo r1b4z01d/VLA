@@ -30,30 +30,34 @@ lerobot-train \
   from scratch). Drop `batch_size` if the 4090 OOMs; SmolVLA is designed to fine-tune on modest VRAM.
 - SmolVLA fine-tunes fast (~20k steps is plenty for a single task); with more demos, scale steps.
 
-## Deploy / eval — remote inference (robot PC `.80` has no GPU)
-**Measured:** SmolVLA is **~2.6 s/inference on `.80`'s CPU** (vs ~1 ms for ACT) — unusable for real-time.
-So inference runs on the **GPU box** and only observations/actions cross the wire. Bridge:
-`ur5e_lerobot/remote.py` (framed-pickle TCP protocol + client) · `scripts/infer_server.py` (GPU server) ·
-`eval_hw.py --remote HOST:PORT` (robot-PC client — no policy/checkpoint/deps needed locally in this mode).
-
-**Put the GPU box on the robot's subnet** (keep it dual-homed so it still has internet for training). Then
-`.80` connects straight to the GPU — no Mac relay, no tunnel:
+## Deploy / eval — remote inference, server ON THE ROBOT (Jetson Orin)
+**History:** the Intel robot PC had no GPU and SmolVLA was **~2.6 s/inference on its CPU** (vs ~1 ms for
+ACT), so the policy was split into a server process behind a framed-pickle TCP bridge and served from the
+GPU box. Since 2026-10-10 the robot PC is a **Jetson AGX Orin** and the same server runs **on the robot**
+(`services/rd/vla_infer_server.conf`, ~0.8 s per chunk, covered by `--prefetch --rtc`); the GPU box only
+trains. Bridge: `ur5e_lerobot/remote.py` (protocol + client) · `scripts/infer_server.py` (server) ·
+`eval_hw.py --remote HOST:PORT` (client — no policy/checkpoint/deps needed locally in this mode).
 ```bash
-# 1) GPU box: serve the policy (reactivity is set HERE, server-side; open port 8777 in the firewall)
-.venv/bin/python scripts/infer_server.py \
-  --ckpt outputs/train/hw_pickplace_smolvla/checkpoints/last/pretrained_model \
-  --device cuda --port 8777 --n-action-steps 8
+# 1) GPU box: train (web manager Train button / scripts/train_regrasp.py), then ship the checkpoint
+rsync -a ~/VLA/outputs/train/<run>/checkpoints/<step>/ rd@192.168.11.80:VLA/outputs/train/<run>/checkpoints/<step>/
 
-# 2) robot PC .80: run the eval client straight at the GPU (e-stop in hand)
-~/VLA/run.sh scripts/eval_hw.py --remote <GPU_IP>:8777 --task "pick up the Home Depot bucket" --fps 12 --video
+# 2) robot (RD): point the serve symlink at it and (re)start the unit — reactivity is set in the unit
+ln -sfn ~/VLA/outputs/train/<run>/checkpoints/<step>/pretrained_model ~/VLA/outputs/serve_ckpt
+sudo supervisorctl restart vla_infer_server
+
+# 3) robot (RD): eval client against loopback (e-stop in hand)
+~/VLA/run.sh scripts/eval_hw.py --remote 127.0.0.1:8777 --cameras udp --task "pick up tigger" --fps 12 --video
 ```
-On the GPU SmolVLA is ~tens of ms, so `--n-action-steps` can be small (reactive); the action-chunk design
-also absorbs network latency. Validated offline with a mock server (protocol/client round-trip + reset);
-the live path needs both machines on the network to confirm.
+The server answers `{"cmd":"info"}` with the resolved checkpoint, its reactivity flags and the capture
+geometry carried from the dataset (`capture.json`); the eval writes that into its registry record, so the
+web manager groups runs per model. The action-chunk design absorbs the chunk compute: on the Orin
+`--n-action-steps 24 --prefetch --prefetch-at 21 --rtc` (measured in the unit file), vs
+`--n-action-steps 8 --prefetch --rtc` on a 4090.
 
-_Fallback — if they must stay on different subnets:_ relay through the Mac with
-`ssh -N -L 0.0.0.0:8777:localhost:8777 gpu` (needs `GatewayPorts yes`) and point the client at `<MAC_IP>:8777`.
-_Permanent fix:_ a GPU in the robot PC — then drop `--remote` and run local.
+_Fallback — serve from the GPU box:_ `sudo supervisorctl start vla_infer_server` there
+(`services/vla_infer_server.conf`, dual-homed on the robot subnet) and point the client at
+`--remote <GPU_IP>:8777`. Not the normal path any more: the GPU box reaches the robot segment over Wi-Fi
+only (its wired NIC is dead) and real-time actions over that link stutter.
 
 ## OPEN DECISION — lerobot version alignment (verify when the machines are back)
 SmolVLA requires the `smolvla` policy + `transformers`. **The pinned `.venv` on both the GPU box and `.80`

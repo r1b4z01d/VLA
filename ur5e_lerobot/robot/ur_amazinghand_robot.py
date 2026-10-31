@@ -109,14 +109,27 @@ class URAmazingHand(Robot):
             obs[cam_key] = cam.read_latest()
         return obs
 
+    def send_curls(self, curls) -> None:
+        """Command the hand AND update the curls `get_observation` reports.
+
+        There is no finger feedback on the J: firmware path, so observation.state's hand curls are
+        this cached copy of the last command. Anything that drives the hand must come through here
+        (or send_action): calling `self.hand.send_curls` directly moves the fingers but leaves the
+        cache stale, and the policy — for which the curls are an INPUT — keeps seeing the old grasp.
+        That was the eval's run-2 failure: release-hand opened the fingers, the observation still
+        said closed, and the copycat policy curled them again from step 0.
+        """
+        curls = [float(v) for v in curls]
+        self.hand.send_curls(curls)
+        self._hand_curls = curls
+
     def send_action(self, action: RobotAction) -> RobotAction:
         self._require_connected()
         pose = [float(action[k]) for k in ARM_POSE_NAMES]
         curls = [float(action[k]) for k in HAND_CURL_NAMES]
 
         sent_pose = self.arm.send_ee_pose(pose)
-        self.hand.send_curls(curls)
-        self._hand_curls = curls
+        self.send_curls(curls)
 
         sent: RobotAction = {k: float(v) for k, v in zip(ARM_POSE_NAMES, sent_pose)}
         sent.update({k: float(v) for k, v in zip(HAND_CURL_NAMES, curls)})

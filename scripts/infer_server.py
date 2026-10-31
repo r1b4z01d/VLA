@@ -5,6 +5,8 @@
     .venv/bin/python scripts/infer_server.py \
         --ckpt outputs/train/<run>/checkpoints/last/pretrained_model --device cuda --port 8777 \
         [--n-action-steps 8]     # reactivity lives HERE (server-side), not on the client
+        [--also <run> ...]       # keep more checkpoints RESIDENT; {'cmd':'select','model':<run>} switches
+                                 # between them instantly (a route's grab and place models, ~1 GB each)
 
 --mock: skip the policy and return a zero action — for offline protocol/client testing with no GPU/ckpt.
 """
@@ -44,7 +46,7 @@ class _ChunkScheduler:
     """
 
     def __init__(self, policy, pre, post, horizon: int, prefetch_at: int = 2, use_rtc: bool = False,
-                 inference_delay: "int | None" = None):
+                 inference_delay: "int | None" = None, execution_horizon: "int | None" = None):
         import threading
 
         self.policy, self.pre, self.post = policy, pre, post
@@ -55,12 +57,20 @@ class _ChunkScheduler:
         # how many steps elapse while the chunk is computed; RTC pins that many leading actions to the
         # outgoing chunk. Defaults to prefetch_at, i.e. exactly the steps we expect to consume.
         self.inference_delay = int(inference_delay) if inference_delay is not None else self.prefetch_at
+        # How far RTC's guidance reaches. Defaults to the whole served horizon, which anchors EVERY
+        # executed action to the previous plan -- smooth, but the policy then can't react to a moved
+        # object. Keep it just above inference_delay to leave the tail free.
+        self.execution_horizon = int(execution_horizon) if execution_horizon else self.horizon
         self._q: list = []           # postprocessed actions still to hand out
         self._raw = None             # SAME chunk pre-postprocessing (normalized) — RTC's reference frame
         self._pending = None         # (raw, actions) computed by the background thread, not installed
         self._thread = None
         self._latest_obs = None
-        self._lock = threading.Lock()      # guards _q / _raw / _pending / _thread
+        # Bumped by reset(). A prefetch carries the epoch it was spawned under and discards its result
+        # if that no longer matches, so a chunk planned for a finished episode can never be installed
+        # into the next one. See reset() for the failure this prevents.
+        self._epoch = 0
+        self._lock = threading.Lock()      # guards _q / _raw / _pending / _thread / _epoch
         self._gpu = threading.Lock()       # serialises forward passes (one at a time on the device)
         self._threading = threading
         self.stats = {"inline": 0, "prefetched": 0, "waited": 0, "rtc_guided": 0, "chunk_ms": []}
@@ -80,7 +90,7 @@ class _ChunkScheduler:
         if self.use_rtc and prev_left is not None and prev_left.shape[1] > 0:
             kwargs = {"prev_chunk_left_over": prev_left,
                       "inference_delay": self.inference_delay,
-                      "execution_horizon": self.horizon}
+                      "execution_horizon": self.execution_horizon}
         t0 = _t.time()
         with self._gpu, torch.no_grad():  # RTC re-enables grad internally where it needs autograd
             raw = self.policy.predict_action_chunk(self.pre(obs), **kwargs)
@@ -89,9 +99,15 @@ class _ChunkScheduler:
         self.stats["chunk_ms"].append(ms)
         if kwargs:
             self.stats["rtc_guided"] += 1
-        return raw[:, :self.horizon].detach(), [a for a in phys[0, :self.horizon].cpu().numpy()]
+        # Keep prefetch_at extra actions beyond the horizon: a prefetched chunk is planned from an
+        # observation taken when prefetch_at actions were still queued, and those play while it
+        # computes, so _install skips that many and the horizon that follows is the fresh part.
+        keep = min(self.horizon + self.prefetch_at, raw.shape[1])
+        return raw[:, :keep].detach(), [a for a in phys[0, :keep].cpu().numpy()]
 
     def _spawn_prefetch(self, obs, prev_left) -> None:
+        epoch = self._epoch          # the episode this chunk is being planned for
+
         def work():
             try:
                 c = self._compute(obs, prev_left)
@@ -99,22 +115,42 @@ class _ChunkScheduler:
                 print(f"[prefetch] failed: {type(e).__name__}: {e}", flush=True)
                 c = None
             with self._lock:
+                if epoch != self._epoch:
+                    # reset() ran while this was computing: the chunk describes a finished episode's
+                    # pose. Dropping it on the floor is the whole point of the epoch counter — do NOT
+                    # touch _thread here, a newer prefetch may already own it.
+                    return
                 self._pending, self._thread = c, None
 
         self._thread = self._threading.Thread(target=work, daemon=True)
         self._thread.start()
 
-    def _install(self, computed) -> None:
-        """Swap a freshly computed (raw, actions) pair in as the live chunk. Caller holds _lock."""
-        if computed is not None:
-            self._raw, self._q = computed[0], list(computed[1])
+    def _install(self, computed, skip: int = 0) -> None:
+        """Swap a freshly computed (raw, actions) pair in as the live chunk. Caller holds _lock.
+
+        `skip` is how many of the chunk's leading actions already elapsed while it was computing
+        (prefetch_at for a prefetched chunk, 0 for an inline one). Before 2026-10-11 every chunk was
+        installed from action 0, so a prefetched chunk re-played the stretch the arm had just driven:
+        a seam of prefetch_at x (per-step motion) — 46 mm on the GPU box at prefetch_at=2, and a
+        ~200 mm snap back every chunk on the Jetson at prefetch_at=21 (the arm "rocking"). RTC makes
+        the skipped prefix consistent with the old tail, so starting at `skip` is seamless.
+        """
+        if computed is None:
+            return
+        raw, acts = computed
+        if skip and len(acts) - skip < 1:
+            print(f"[prefetch] chunk too short to skip {skip} elapsed actions (len {len(acts)}); "
+                  "installing from 0 — raise the policy chunk_size or lower --prefetch-at", flush=True)
+            skip = 0
+        self._raw = raw[:, skip:skip + self.horizon]
+        self._q = list(acts[skip:skip + self.horizon])
 
     def next_action(self, obs):
         with self._lock:
             self._latest_obs = obs
             if not self._q:
                 if self._pending is not None:
-                    self._install(self._pending)
+                    self._install(self._pending, skip=self.prefetch_at)
                     self._pending = None
                     self.stats["prefetched"] += 1
                     t = None
@@ -127,7 +163,7 @@ class _ChunkScheduler:
             t.join()
             with self._lock:
                 if self._pending is not None:
-                    self._install(self._pending)
+                    self._install(self._pending, skip=self.prefetch_at)
                     self._pending = None
                 self.stats["waited"] += 1
 
@@ -136,7 +172,7 @@ class _ChunkScheduler:
         if need_inline:            # first call, or the prefetch errored: compute on the request path
             c = self._compute(obs)
             with self._lock:
-                self._install(c)
+                self._install(c, skip=0)      # computed from the current observation: nothing elapsed
                 self.stats["inline"] += 1
 
         with self._lock:
@@ -151,9 +187,21 @@ class _ChunkScheduler:
             return action
 
     def reset(self) -> None:
-        """Drop everything in flight — the client is starting a fresh episode from a new pose."""
+        """Drop everything in flight — the client is starting a fresh episode from a new pose.
+
+        The epoch bump is load-bearing. Clearing _pending is not enough: a prefetch spawned near the end
+        of the previous episode is still running, and it used to write its result into _pending AFTER
+        this returned. That chunk was planned from the old episode's final observation (hand closing on
+        the object), and the next episode installed it as soon as its first chunk drained — measured on
+        hardware as an 8-step window (one horizon) deviating ~50x the repeat-noise floor, starting
+        around step 10 of every run after the first. On the robot that looked like the fingers grasping,
+        opening and fluttering before the real behaviour resumed. Run 1 was always clean because nothing
+        preceded it.
+        """
         with self._lock:
+            self._epoch += 1
             self._q, self._raw, self._pending, self._thread = [], None, None, None
+            self._latest_obs = None
         self.policy.reset()
         cm = self.stats["chunk_ms"]
         chunk = (f", chunk compute med={sorted(cm)[len(cm) // 2]:.0f}ms max={max(cm):.0f}ms n={len(cm)}"
@@ -163,9 +211,101 @@ class _ChunkScheduler:
               f"{self.stats['inline']} inline, {self.stats['waited']} waited{rtc}{chunk})", flush=True)
 
 
+def _capture_for(real: str) -> "dict | None":
+    """The camera geometry a checkpoint was trained on (capture_meta): training copies the dataset's
+    meta/capture.json into outputs/train/<run>/capture.json; fall back to the dataset root named in
+    train_config.json when that copy is missing (older runs). The eval applies it to the cameras, so a
+    floor-task model and a shelf-task model each get their own framing."""
+    import json as _json
+
+    run_dir = os.path.dirname(os.path.dirname(os.path.dirname(real))) if real else ""
+    cands = [os.path.join(run_dir, "capture.json")] if run_dir else []
+    try:
+        tc = _json.load(open(os.path.join(real, "train_config.json")))
+        droot = (tc.get("dataset") or {}).get("root")
+        if droot:
+            cands.append(os.path.join(droot, "meta", "capture.json"))
+    except Exception:  # noqa: BLE001
+        pass
+    for p in cands:
+        if os.path.isfile(p):
+            try:
+                capture = _json.load(open(p))
+                capture["source"] = p
+                return capture
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+class Served:
+    """One resident checkpoint: policy + processors + its own chunk scheduler + the geometry it wants."""
+
+    def __init__(self, ckpt: str, args, eval_hw, make_pre_post_processors):
+        import torch
+
+        self.ckpt = ckpt
+        self.real = os.path.realpath(ckpt)
+        self.tail = self.real.split("/outputs/", 1)[-1] if "/outputs/" in self.real else self.real
+        parts = self.real.split(os.sep)
+        self.run = parts[parts.index("train") + 1] if "train" in parts else os.path.basename(self.real)
+        self.policy, self.ptype = eval_hw._load_policy(ckpt, args.device)
+        if args.num_steps and hasattr(self.policy.config, "num_steps"):
+            self.policy.config.num_steps = int(args.num_steps)
+        self.pre, self.post = make_pre_post_processors(
+            self.policy.config, pretrained_path=ckpt,
+            preprocessor_overrides={"device_processor": {"device": args.device}})
+        eval_hw._set_reactivity(self.policy, self.ptype, args.n_action_steps, args.temporal_ensemble)
+        self.policy.reset()
+        if args.rtc:
+            from lerobot.policies.rtc.configuration_rtc import RTCConfig
+
+            eh = args.rtc_execution_horizon or (args.n_action_steps or 8)
+            self.policy.config.rtc_config = RTCConfig(enabled=True, execution_horizon=eh,
+                                                      max_guidance_weight=args.rtc_max_guidance)
+            self.policy.init_rtc_processor()
+        self.scheduler = _ChunkScheduler(self.policy, self.pre, self.post, horizon=args.n_action_steps or 8,
+                                         prefetch_at=args.prefetch_at, use_rtc=args.rtc,
+                                         inference_delay=args.rtc_inference_delay,
+                                         execution_horizon=args.rtc_execution_horizon) if args.prefetch else None
+        try:
+            self.img_keys = [k.split(".")[-1] for k in self.policy.config.input_features
+                             if k.startswith("observation.images.")]
+        except Exception:  # noqa: BLE001
+            self.img_keys = []
+        if not self.img_keys:
+            self.img_keys = ["scene", "wrist", "side"]
+        self.capture = _capture_for(self.real)
+        self._torch = torch
+
+    def matches(self, key: str) -> bool:
+        k = key.strip()
+        return k in (self.run, self.tail, self.ckpt, self.real) or (os.path.exists(k) and os.path.realpath(k) == self.real)
+
+    def infer(self, obs):
+        if self.scheduler is not None:
+            return self.scheduler.next_action(obs)
+        with self._torch.no_grad():
+            return self.post(self.policy.select_action(self.pre(obs)))[0].cpu().numpy()
+
+    def reset(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.reset()      # drops any in-flight prefetch too
+        else:
+            self.policy.reset()
+
+    def brief(self) -> dict:
+        return {"run": self.run, "checkpoint": self.tail, "checkpoint_realpath": self.real,
+                "capture": (self.capture or {}).get("squares")}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Serve a trained policy's actions to the robot PC over TCP.")
-    ap.add_argument("--ckpt", help="path to .../checkpoints/last/pretrained_model (omit with --mock)")
+    ap.add_argument("--ckpt", help="path to .../checkpoints/last/pretrained_model (omit with --mock); "
+                                   "served at start")
+    ap.add_argument("--also", action="append", default=[], metavar="RUN|PATH",
+                    help="more checkpoints to keep RESIDENT (a run name under outputs/train, run@step, or a "
+                         "path); {'cmd':'select','model':RUN} switches between them without a restart")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8777)
@@ -186,6 +326,18 @@ def main() -> None:
                     help="steps assumed to elapse during a chunk computation (default: --prefetch-at)")
     ap.add_argument("--rtc-max-guidance", type=float, default=10.0,
                     help="RTCConfig.max_guidance_weight — how hard the seam is pulled toward the old chunk")
+    ap.add_argument("--rtc-execution-horizon", type=int, default=None,
+                    help="how many leading actions RTC guides toward the previous chunk (default: the "
+                         "whole served horizon). This is a SMOOTHNESS vs RESPONSIVENESS dial: guidance "
+                         "decays linearly from --rtc-inference-delay to here, and anything inside the "
+                         "window is anchored to the old plan, so setting it to the full horizon leaves "
+                         "NO served action free to react to a new observation (the policy then keeps "
+                         "driving to where the object was). Set it just above the inference delay — e.g. "
+                         "3 with delay 2 — to pin only the in-flight actions and leave the rest free.")
+    ap.add_argument("--num-steps", type=int, default=None,
+                    help="override the flow-matching denoising steps per chunk (SmolVLA config num_steps, "
+                         "default 10). Fewer = faster chunks at the cost of action fidelity: on the Jetson "
+                         "AGX Orin 10 steps ~875 ms, 6 ~600 ms (mean action drift 0.035), 4 ~460 ms (0.054).")
     ap.add_argument("--mock", action="store_true", help="no policy; return a zero action (test only)")
     ap.add_argument("--eval-name", default=None,
                     help="name for the GPU-side auto-captured eval run (default: <model>_<timestamp>)")
@@ -200,18 +352,45 @@ def main() -> None:
 
     if not args.ckpt:
         ap.error("--ckpt is required (or use --mock)")
+    if args.rtc and not args.prefetch:
+        ap.error("--rtc needs --prefetch (RTC blends the seam that prefetch's stale chunk creates)")
 
     import numpy as np
     import torch
     from lerobot.policies.factory import make_pre_post_processors
     import eval_hw  # reuse the exact policy-load + reactivity logic the local eval uses
+    from ur5e_lerobot.services import resolve_checkpoint
 
-    policy, ptype = eval_hw._load_policy(args.ckpt, args.device)
-    pre, post = make_pre_post_processors(policy.config, pretrained_path=args.ckpt,
-                                         preprocessor_overrides={"device_processor": {"device": args.device}})
-    eval_hw._set_reactivity(policy, ptype, args.n_action_steps, args.temporal_ensemble)
-    policy.reset()
-    print(f"[server] loaded {ptype} on {args.device}", flush=True)
+    # Resolve + dedupe the resident set (serve_ckpt usually points at one of the --also runs).
+    wanted = [args.ckpt]
+    for a in args.also:
+        try:
+            wanted.append(resolve_checkpoint(a))
+        except FileNotFoundError as e:
+            print(f"[server] --also {a}: {e} — skipped", flush=True)
+    models: list = []
+    for ck in wanted:
+        real = os.path.realpath(ck)
+        if any(m.real == real for m in models):
+            continue
+        import time as _time
+        _t = _time.time()
+        m = Served(ck, args, eval_hw, make_pre_post_processors)
+        models.append(m)
+        print(f"[server] loaded {m.ptype} {m.tail} on {args.device} in {_time.time() - _t:.1f} s"
+              + (f" (num_steps={m.policy.config.num_steps})" if args.num_steps else "")
+              + f"; image inputs {m.img_keys}; capture {(m.capture or {}).get('squares')}", flush=True)
+    active = {"m": models[0]}
+    if args.rtc:
+        print(f"[server] RTC on — execution_horizon={models[0].policy.config.rtc_config.execution_horizon}, "
+              f"max_guidance_weight={args.rtc_max_guidance}", flush=True)
+    if models[0].scheduler is not None:
+        sch = models[0].scheduler
+        print(f"[server] PREFETCH on — horizon={sch.horizon}, refill when <={sch.prefetch_at} actions remain "
+              f"(re-plan runs off the request path)"
+              + (f", rtc inference_delay={sch.inference_delay}" if sch.use_rtc else ""), flush=True)
+    if len(models) > 1:
+        print(f"[server] {len(models)} models resident: {[m.run for m in models]} — active: {models[0].run}", flush=True)
 
     def chw(img):
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float().div(255)[None]
@@ -226,106 +405,101 @@ def main() -> None:
             obs[f"observation.images.{name}"] = chw(img)
         return obs
 
-    if args.rtc and not args.prefetch:
-        ap.error("--rtc needs --prefetch (RTC blends the seam that prefetch's stale chunk creates)")
-    if args.rtc:
-        # SmolVLA ships RTC (policies/rtc) but leaves rtc_config=None, and select_action asserts
-        # against it — it only works through predict_action_chunk, which is what the scheduler uses.
-        from lerobot.policies.rtc.configuration_rtc import RTCConfig
-
-        policy.config.rtc_config = RTCConfig(enabled=True, execution_horizon=args.n_action_steps or 8,
-                                             max_guidance_weight=args.rtc_max_guidance)
-        policy.init_rtc_processor()
-        print(f"[server] RTC on — execution_horizon={policy.config.rtc_config.execution_horizon}, "
-              f"max_guidance_weight={args.rtc_max_guidance}", flush=True)
-
-    scheduler = _ChunkScheduler(policy, pre, post, horizon=args.n_action_steps or 8,
-                                prefetch_at=args.prefetch_at, use_rtc=args.rtc,
-                                inference_delay=args.rtc_inference_delay) if args.prefetch else None
-    if scheduler is not None:
-        print(f"[server] PREFETCH on — horizon={scheduler.horizon}, refill when "
-              f"<={scheduler.prefetch_at} actions remain (re-plan runs off the request path)"
-              + (f", rtc inference_delay={scheduler.inference_delay}" if scheduler.use_rtc else ""),
-              flush=True)
-
     def infer(state, images, task):
-        obs = build_obs(state, images, task)
-        if scheduler is not None:
-            return scheduler.next_action(obs)
-        with torch.no_grad():
-            return post(policy.select_action(pre(obs)))[0].cpu().numpy()
+        return active["m"].infer(build_obs(state, images, task))
 
-    # image keys this policy was trained with (scene/wrist/side) — used to build the warmup obs
-    try:
-        img_keys = [k.split(".")[-1] for k in policy.config.input_features
-                    if k.startswith("observation.images.")]
-    except Exception:  # noqa: BLE001
-        img_keys = []
-    if not img_keys:
-        img_keys = ["scene", "wrist", "side"]
-    print(f"[server] image inputs: {img_keys}", flush=True)
-
-    # Warm up so the FIRST client request isn't a ~100 s cold start (CUDA autotune + first VLM forward).
+    # Warm up EVERY resident model so the first request (and the first request after a select) isn't
+    # a ~100 s cold start (CUDA autotune + first VLM forward).
     import time as _time
     from ur5e_lerobot.schema import STATE_NAMES
 
-    print("[server] warming up (one dummy inference)…", flush=True)
-    _t = _time.time()
     _dummy = np.zeros((H, W, 3), dtype=np.uint8)
-    infer(np.zeros(len(STATE_NAMES), dtype=np.float32),
-          {k: _dummy for k in img_keys}, "warmup")
-    policy.reset()  # clear the queue so the first real request re-plans from the real observation
-    print(f"[server] warmup done in {_time.time() - _t:.1f}s — ready", flush=True)
+    for m in models:
+        print(f"[server] warming up {m.run} (one dummy inference)…", flush=True)
+        _t = _time.time()
+        m.infer(build_obs(np.zeros(len(STATE_NAMES), dtype=np.float32), {k: _dummy for k in m.img_keys}, "warmup"))
+        m.reset()  # clear the queue so the first real request re-plans from the real observation
+        print(f"[server] warmup done in {_time.time() - _t:.1f}s", flush=True)
+    print("[server] ready", flush=True)
 
-    # GPU-side eval capture: record this serving session as outputs/evals/<name>/eval.json so it shows
-    # up in the manager. This captures the OBJECTIVE inference stats (checkpoint, episodes≈resets,
-    # inference count + latency); the operator fills in success/rating/notes from the GUI afterward.
-    # with --prefetch the scheduler owns the queue, so a reset must clear ITS state too (otherwise a
-    # new episode replays actions planned from the previous episode's pose)
-    reset_all = scheduler.reset if scheduler is not None else policy.reset
-    serve_infer, serve_reset = infer, reset_all
+    # GPU-side eval capture: record each serving session (per active model) as outputs/evals/<name>/
+    # eval.json so it shows up in the manager. This captures the OBJECTIVE inference stats (checkpoint,
+    # episodes≈resets, inference count + latency); the operator fills in success/rating/notes from the
+    # GUI afterward. Written LAZILY, on the first inference / reset: a server that only answered `info`
+    # (a model switch, an eval preflight) used to leave a 0-episode record on every start.
+    serve_infer, serve_reset = infer, lambda: active["m"].reset()
+    cap = {"ev": None, "run": None, "lat": []}
     if not args.no_eval:
         import json as _json
-        import time as _t
 
         _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        _parts = os.path.abspath(args.ckpt).split(os.sep)
-        _model = _parts[_parts.index("train") + 1] if "train" in _parts else ptype
-        _name = args.eval_name or f"{_model}_{_t.strftime('%Y%m%d_%H%M%S')}"
-        _run = os.path.join(_root, "outputs", "evals", _name)
-        os.makedirs(_run, exist_ok=True)
-        _ev = {"created": _t.time(), "source": "auto", "model": _model, "checkpoint": args.ckpt,
-               "device": args.device, "n_action_steps": args.n_action_steps,
-               "episodes": 0, "inferences": 0, "task": None}
-        _lat: list[float] = []
+
+        def _new_capture(m: "Served") -> None:
+            name = args.eval_name or f"{m.run}_{_time.strftime('%Y%m%d_%H%M%S')}"
+            cap["run"] = os.path.join(_root, "outputs", "evals", name)
+            cap["ev"] = {"created": _time.time(), "source": "auto", "model": m.run, "checkpoint": m.tail,
+                         "device": args.device, "n_action_steps": args.n_action_steps,
+                         "episodes": 0, "inferences": 0, "task": None}
+            cap["lat"] = []
+            print(f"[server] eval capture -> outputs/evals/{name} (written on the first inference)", flush=True)
 
         def _save() -> None:
-            s = dict(_ev)
-            if _lat:
-                s["infer_ms_avg"] = round(sum(_lat) / len(_lat), 1)
-            with open(os.path.join(_run, "eval.json"), "w") as f:
+            os.makedirs(cap["run"], exist_ok=True)
+            s = dict(cap["ev"])
+            if cap["lat"]:
+                s["infer_ms_avg"] = round(sum(cap["lat"]) / len(cap["lat"]), 1)
+            with open(os.path.join(cap["run"], "eval.json"), "w") as f:
                 _json.dump(s, f, indent=2, sort_keys=True)
 
-        _save()
-        print(f"[server] eval capture -> outputs/evals/{_name}", flush=True)
+        _new_capture(models[0])
 
         def serve_infer(state, images, task):  # noqa: F811
-            _t0 = _t.time()
+            _t0 = _time.time()
             a = infer(state, images, task)
-            _lat.append((_t.time() - _t0) * 1000)
-            _ev["inferences"] += 1
-            if _ev["task"] is None and task and task != "warmup":
-                _ev["task"] = task
-            if _ev["inferences"] % 50 == 0:
+            cap["lat"].append((_time.time() - _t0) * 1000)
+            ev = cap["ev"]
+            ev["inferences"] += 1
+            if ev["task"] is None and task and task != "warmup":
+                ev["task"] = task
+            if ev["inferences"] == 1 or ev["inferences"] % 50 == 0:
                 _save()
             return a
 
         def serve_reset():  # noqa: F811
-            _ev["episodes"] += 1
+            cap["ev"]["episodes"] += 1
             _save()
-            reset_all()  # NOT policy.reset() — with --prefetch the scheduler's queue must clear too
+            active["m"].reset()  # NOT policy.reset() — with --prefetch the scheduler's queue must clear too
 
-    remote.serve(args.host, args.port, serve_infer, reset_fn=serve_reset)
+    def serve_info() -> dict:
+        """Answer {'cmd':'info'}: what this process serves, RESOLVED. --ckpt is usually the
+        outputs/serve_ckpt symlink, which is useless in an eval record (it is repointed between runs);
+        the realpath gives train/<run>/checkpoints/<step>, which is what groups evals by model."""
+        m = active["m"]
+        return {"checkpoint": m.tail, "checkpoint_realpath": m.real, "run": m.run,
+                "n_action_steps": args.n_action_steps, "prefetch": bool(args.prefetch),
+                "rtc": bool(args.rtc), "rtc_execution_horizon": args.rtc_execution_horizon,
+                "num_steps": args.num_steps, "device": args.device, "capture": m.capture,
+                "models": [x.brief() for x in models]}
+
+    def serve_cmd(msg: dict) -> dict:
+        """{'cmd':'select','model': run|path}: make a resident model the active one (instant)."""
+        if msg.get("cmd") != "select":
+            return {"ok": False, "error": f"unknown cmd {msg.get('cmd')!r}"}
+        key = str(msg.get("model", ""))
+        m = next((x for x in models if x.matches(key)), None)
+        if m is None:
+            return {"ok": False, "error": f"model {key!r} is not resident; resident: {[x.run for x in models]}"}
+        if m is not active["m"]:
+            _t = _time.time()
+            active["m"].reset()         # drop the old model's in-flight chunk
+            active["m"] = m
+            m.reset()
+            if not args.no_eval and cap["ev"] is not None:
+                _new_capture(m)
+            print(f"[server] selected {m.run} in {(_time.time() - _t) * 1000:.0f} ms", flush=True)
+        return {"ok": True, **serve_info()}
+
+    remote.serve(args.host, args.port, serve_infer, reset_fn=serve_reset, info_fn=serve_info, cmd_fn=serve_cmd)
 
 
 if __name__ == "__main__":

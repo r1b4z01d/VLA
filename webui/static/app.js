@@ -28,7 +28,10 @@ const el = (tag, attrs = {}, ...kids) => {
 async function api(path, opts) {
   const r = await fetch(path, opts);
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.detail || `${r.status} ${r.statusText}`);
+  if (!r.ok) {
+    const d = body.detail;                     // FastAPI: a string, or a list of validation errors
+    throw new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => `${(x.loc || []).join(".")}: ${x.msg}`).join("; ") : `${r.status} ${r.statusText}`);
+  }
   return body;
 }
 const post = (path, payload) =>
@@ -105,6 +108,14 @@ async function loadDatasets(fromMonitor = false) {
   }
 }
 
+function captureStr(c) {
+  const sq = c.squares || {};
+  const parts = ["scene", "wrist", "side"].filter((k) => k in sq)
+    .map((k) => `${k} ${sq[k] == null ? "none" : Number(sq[k]).toFixed(2)}`);
+  const rec = c.recorded || {};
+  const f = (rec.first || "").slice(0, 10), l = (rec.last || rec.first || "").slice(0, 10);
+  return "crop: " + (parts.join(" · ") || "—") + (f ? ` · recorded ${f}${l && l !== f ? " .. " + l : ""}` : "");
+}
 function renderDatasets() {
   const list = $("#dataset-list");
   list.replaceChildren();
@@ -125,9 +136,16 @@ function renderDatasets() {
       el("div", { class: "ds-meta" },
         `${d.episodes} eps · ${d.frames} frames · ${d.fps ?? "?"}fps · ${d.size_mb ?? "?"}MB`),
       el("div", { class: "ds-meta" }, "task: " + (d.tasks && d.tasks.length ? d.tasks.join(", ") : "—")),
+      // camera geometry + recording dates from meta/capture.json (written by the teleop panel).
+      // Datasets with different crops cannot be merged or share a checkpoint — that's why it's here.
+      el("div", { class: "ds-meta", title: d.capture ? "meta/capture.json" : "recorded before capture.json existed" },
+        d.capture ? captureStr(d.capture) : "crop: unknown (pre-capture.json)"),
       el("div", { class: "ds-foot" },
+        el("button", { class: "btn tiny primary", onclick: (e) => { e.stopPropagation(); doTrain(d.name); } }, "Train"),
         el("button", { class: "btn tiny", onclick: (e) => { e.stopPropagation(); doRenameDataset(d.name); } }, "rename"),
         el("button", { class: "btn tiny", onclick: (e) => { e.stopPropagation(); doToVideo(d.name); } }, "Export video"),
+        el("button", { class: "btn tiny", title: "copy the teleop launch line that appends to this dataset (same crop, storage and task)",
+          onclick: (e) => { e.stopPropagation(); copyRecordCmd(d); } }, "record cmd"),
         d.has_backup ? el("button", { class: "btn tiny", onclick: (e) => { e.stopPropagation(); doRestore(d.name); } }, "restore .bak") : null,
         el("button", { class: "btn tiny danger", onclick: (e) => { e.stopPropagation(); doDeleteDataset(d.name); } }, "delete")));
     list.append(card);
@@ -162,6 +180,27 @@ function stars(ep) {
   return box;
 }
 
+// Read-only cells for what the teleop panel recorded. Both are per-episode facts about how the take
+// was captured, not opinions like rating/notes, so they are shown rather than edited here.
+function graspsCell(ep) {
+  const n = ep.grasps;
+  // absent = recorded before the flag existed; NOT the same as a clean single grasp, so it reads "—"
+  if (!n) return el("span", { class: "muted" }, "—");
+  if (n === 1) return el("span", { class: "mono" }, "1");
+  const spans = (ep.regrasp_ranges || []).map((r) => `${r[0]}-${r[1]}`).join(", ");
+  return el("span", { class: "tag warn", title: spans ? `re-grasp frames ${spans}` : "" }, String(n));
+}
+
+function exposureCell(ep) {
+  const e = ep.exposure;
+  if (!e) return el("span", { class: "muted" }, "auto");
+  const parts = Object.keys(e).sort().map((k) => `${k}=${Math.round(e[k])}`);
+  // collapse to one number when every camera matched, else show the spread on hover
+  const vals = Object.values(e).map(Math.round);
+  const same = vals.every((v) => v === vals[0]);
+  return el("span", { class: "mono", title: parts.join("  ") }, same ? String(vals[0]) : `${Math.min(...vals)}–${Math.max(...vals)}`);
+}
+
 function renderEpisodes() {
   $("#episodes-empty").hidden = true;
   const tbl = $("#episodes-table"); tbl.hidden = false;
@@ -181,6 +220,8 @@ function renderEpisodes() {
       el("td", { class: "c-len mono" }, String(ep.length)),
       el("td", { class: "c-len mono" }, ep.duration_s + "s"),
       el("td", { class: "c-rate" }, stars(ep)),
+      el("td", { class: "c-num" }, graspsCell(ep)),
+      el("td", { class: "c-num" }, exposureCell(ep)),
       el("td", {}, notes),
       el("td", { class: "c-op" }, oper),
       el("td", { class: "c-act" },
@@ -374,6 +415,26 @@ async function doRenameDataset(name) {
   } catch (e) { err(e); }
 }
 
+async function doTrain(name) {
+  const v = await modal({ title: `Train a policy on "${name}"`, submit: "Start training",
+    fields: [
+      { name: "policy", label: "policy", type: "select", value: "smolvla", options: [
+        { value: "smolvla", label: "SmolVLA (fine-tune pretrained)" },
+        { value: "act", label: "ACT (from scratch)" }] },
+      { name: "steps", label: "steps", type: "number", value: "20000" },
+      { name: "batch_size", label: "batch size", type: "number", value: "64" },
+      { name: "save_freq", label: "save every N steps", type: "number", value: "2500",
+        hint: "Runs on this host's GPU. One run at a time — watch progress in the Models tab." },
+    ] });
+  if (!v) return;
+  try {
+    const r = await post(`/api/datasets/${encodeURIComponent(name)}/train`,
+      { policy: v.policy, steps: Number(v.steps), batch_size: Number(v.batch_size),
+        save_freq: Number(v.save_freq) });
+    ok(`training started: ${r.run}`);
+    showView("models");
+  } catch (e) { err(e); }
+}
 async function doDeleteDataset(name) {
   if (!confirm(`Delete the ENTIRE dataset "${name}" (and its .bak)? This cannot be undone.`)) return;
   try { await post(`/api/datasets/${encodeURIComponent(name)}/delete`, { confirm: true }); ok(`deleted ${name}`);
@@ -448,13 +509,22 @@ $("#ep-collapse").addEventListener("click", () => {
 applyCollapse();
 
 // ---- view switching (Datasets / Models / Evals) ----
-const VIEWS = ["datasets", "models", "evals"];
+const VIEWS = ["datasets", "models", "evals", "robot", "routes", "map", "services"];
 function showView(v) {
   state.view = v;
   VIEWS.forEach((name) => { $("#view-" + name).hidden = name !== v; });
   document.querySelectorAll(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   if (v === "models") loadModels();
   if (v === "evals") loadEvals();
+  if (v === "robot") loadRobot();
+  if (v === "routes") loadRoutesView();
+  if (v === "map") loadMapView();
+  if (v === "services") loadServicesView();
+  // the header's right side belongs to the robot page while that view is up; the dataset
+  // monitor / refresh controls only make sense on the dataset views
+  const robot = v === "robot", embedded = robot || v === "routes" || v === "map";
+  ["#monitor", "#datasets-dir", "#btn-refresh"].forEach((s) => { const e = $(s); if (e) e.hidden = embedded; });
+  $("#hdr-robot").hidden = !robot;
   if (location.hash !== "#" + v) location.hash = "#" + v;
 }
 document.querySelectorAll(".nav-btn").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
@@ -536,7 +606,51 @@ async function loadEvals() {
       "No evals yet. Bridge evals are auto-captured here; or add one with “+ New eval”."));
     return;
   }
-  for (const ev of data.evals) box.append(evalCard(ev));
+  // Grouped by model (run/step the server resolved), newest activity first, unassigned last.
+  // Each header carries the COMBINED rating: mean stars over the rated runs in the group.
+  let groups = []; try { groups = (await api("/api/evals/groups")).groups; } catch (e) { groups = []; }
+  const byKey = new Map(); for (const ev of data.evals) { const k = ev.model_key || "unassigned"; if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(ev); }
+  const order = groups.map((g) => g.model_key).filter((k) => byKey.has(k));
+  for (const k of byKey.keys()) if (!order.includes(k)) order.push(k);
+  state.evalCollapsed = state.evalCollapsed || {};
+  for (const k of order) {
+    const g = groups.find((x) => x.model_key === k) || { runs: byKey.get(k).length, rated: 0, rating: null };
+    const runs = byKey.get(k);
+    const collapsed = !!state.evalCollapsed[k];
+    const title = k === "unassigned" ? "unassigned model" : k;
+    const stars = g.rating != null
+      ? el("span", { class: "group-rating", title: `${g.rated} of ${g.runs} runs rated` },
+          "★".repeat(Math.round(g.rating)) + "☆".repeat(5 - Math.round(g.rating)), " ", el("b", {}, g.rating.toFixed(2)))
+      : el("span", { class: "muted" }, "no ratings yet");
+    const stats = el("span", { class: "group-stats" },
+      `${g.runs} run${g.runs === 1 ? "" : "s"} · ${g.rated} rated`,
+      g.success_rate != null ? ` · success ${Math.round(g.success_rate * 100)}%` : "",
+      g.inferred ? ` · ${g.inferred} inferred` : "");
+    const head = el("div", { class: "eval-group-head", onclick: () => { state.evalCollapsed[k] = !collapsed; loadEvals(); } },
+      el("span", { class: "group-toggle" }, collapsed ? "▸" : "▾"),
+      el("span", { class: "group-title" }, title), stars, stats);
+    if (k === "unassigned") {
+      head.append(el("button", { class: "btn tiny", onclick: (e) => { e.stopPropagation(); assignGroup(runs); } },
+        "assign model to all…"));
+    }
+    box.append(el("div", { class: "eval-group" + (collapsed ? " collapsed" : "") }, head,
+      collapsed ? "" : el("div", { class: "eval-group-body" }, ...runs.map(evalCard))));
+  }
+}
+async function assignGroup(runs) {
+  const models = (state.models || []).map((m) => m.name);
+  const v = await modal({ title: `Assign a model to ${runs.length} run${runs.length === 1 ? "" : "s"}`, submit: "Assign",
+    fields: [
+      { name: "checkpoint", label: "checkpoint (train/<run>/checkpoints/<step>)", type: "text",
+        placeholder: models.length ? `e.g. train/${models[0]}/checkpoints/020000` : "train/<run>/checkpoints/020000",
+        hint: "Sets the same checkpoint on every run in this group. Marked as inferred, so it stays distinguishable from a server-reported value." },
+    ] });
+  if (!v || !v.checkpoint) return;
+  try {
+    await post("/api/evals/bulk_annotate", { names: runs.map((r) => r.name),
+      fields: { checkpoint: v.checkpoint, checkpoint_inferred: true } });
+    ok(`assigned ${runs.length} runs`); loadEvals();
+  } catch (e) { err(e); }
 }
 function evalStars(ev) {
   const cur = ev.rating || 0;
@@ -548,10 +662,28 @@ function evalStars(ev) {
 function evalCard(ev) {
   const meta = el("div", { class: "card-meta" });
   const add = (l, v) => { if (v != null && v !== "") meta.append(el("span", {}, `${l}: `, el("b", {}, String(v)))); };
-  add("model", ev.model); add("checkpoint", ev.checkpoint); add("task", ev.task);
+  // checkpoint is EDITABLE: runs recorded before the server reported what it served carry only an
+  // address, and the only way to attribute them is for the operator to say which model ran.
+  const ck = el("input", { class: "ep-input mono", value: ev.checkpoint || "", placeholder: "train/<run>/checkpoints/<step>",
+    title: ev.checkpoint_inferred ? "inferred/assigned by hand, not reported by the server" : "as reported by the inference server",
+    style: "min-width:260px" });
+  ck.addEventListener("change", () => annotateEval(ev.name, { checkpoint: ck.value, checkpoint_inferred: !!ck.value }, false));
+  meta.append(el("span", {}, "checkpoint: ", ck, ev.checkpoint_inferred ? el("span", { class: "tag warn", title: "assigned by hand" }, "inferred") : ""));
+  if (ev.server) add("server", ev.server);
+  add("task", ev.task);
   add("episodes", ev.episodes);
   if (ev.success_rate != null) add("success", Math.round(ev.success_rate * 100) + "%");
   else if (ev.successes != null && ev.episodes) add("success", `${ev.successes}/${ev.episodes}`);
+  // hardware-run facts from eval_hw.py — read-only, and the reason a run is or isn't comparable
+  add("steps", ev.steps);
+  if (ev.duration_s != null) add("duration", ev.duration_s + "s");
+  if (ev.fps != null) add("fps", ev.fps);
+  if (ev.n_action_steps != null) add("n-act", ev.n_action_steps);
+  if (ev.exposure && Object.keys(ev.exposure).length) {
+    const vals = Object.values(ev.exposure).map(Math.round);
+    const same = vals.every((v) => v === vals[0]);
+    add("exposure", same ? vals[0] : `${Math.min(...vals)}–${Math.max(...vals)}`);
+  }
   add("date", fmtDate(ev.created));
 
   const notes = el("input", { class: "ep-input", value: ev.notes || "", placeholder: "notes…" });
@@ -577,7 +709,7 @@ async function annotateEval(name, fields, silent) {
   try {
     await post(`/api/evals/${encodeURIComponent(name)}/annotate`, fields);
     const e = state.evals.find((x) => x.name === name); if (e) Object.assign(e, fields);
-    if ("rating" in fields) loadEvals();
+    if ("rating" in fields || "checkpoint" in fields) loadEvals();   // both change the grouping/roll-up
     if (!silent) ok("saved");
   } catch (e) { err(e); }
 }
@@ -619,6 +751,185 @@ async function newEval() {
 }
 $("#btn-evals-refresh").addEventListener("click", loadEvals);
 $("#btn-eval-new").addEventListener("click", newEval);
+// Live registry: the eval uploads each finished run; re-read while the tab is visible and nobody is typing.
+setInterval(() => {
+  if (state.view !== "evals" || !$("#evals-auto").checked || document.visibilityState !== "visible") return;
+  const a = document.activeElement;
+  if (a && a.closest && a.closest("#view-evals") && ["INPUT", "TEXTAREA", "SELECT"].includes(a.tagName)) return;
+  loadEvals();
+}, 15000);
+
+// ---- robot view: the page the robot PC serves (teleop panel / eval), embedded ----
+let robotTimer = null;
+function robotStatus(r) {
+  const s = $("#robot-status"), c = r.config || {};
+  if (r.reachable) {
+    s.textContent = `● ${c.mode || "up"} — ${c.title || r.url}`; s.className = "mono ok";
+  } else {
+    s.textContent = "○ not running"; s.className = "mono muted";
+  }
+  $("#robot-hint").hidden = r.reachable;
+  $("#robot-frame").hidden = !r.reachable;
+}
+async function loadRobot() {
+  let r; try { r = await api("/api/robot"); } catch (e) { return err(e); }
+  const inp = $("#robot-url"); if (!inp.value) inp.value = r.url;
+  const url = inp.value || r.url, fr = $("#robot-frame");
+  if (r.reachable && fr.dataset.src !== url) { fr.src = url; fr.dataset.src = url; }
+  robotStatus(r);
+  clearInterval(robotTimer);
+  robotTimer = setInterval(async () => {
+    if (state.view !== "robot") return;
+    try {
+      const rr = await api("/api/robot");
+      const was = $("#robot-frame").hidden;
+      robotStatus(rr);
+      if (rr.reachable && was) { fr.src = url; fr.dataset.src = url; }   // came up: load it
+    } catch (e) { /* keep the last status */ }
+  }, 5000);
+}
+$("#robot-url").addEventListener("change", () => { const fr = $("#robot-frame"); fr.src = $("#robot-url").value; fr.dataset.src = fr.src; });
+
+// ---- routes view: the route editor the robot PC serves (map + live pose + waypoints), embedded ----
+let routeTimer = null;
+function routeStatus(r) {
+  const s = $("#route-status"), i = r.info || {};
+  if (r.reachable) {
+    const p = i.pose ? `robot (${i.pose.x.toFixed(2)}, ${i.pose.y.toFixed(2)})` : `no robot pose: ${i.ros || "—"}`;
+    s.textContent = `● route editor — map ${i.map || "?"} · ${p}`; s.className = "mono ok";
+  } else {
+    s.textContent = "○ route editor not running"; s.className = "mono muted";
+  }
+  $("#route-hint").hidden = r.reachable;
+  $("#route-frame").hidden = !r.reachable;
+}
+async function loadRoutesView() {
+  let r; try { r = await api("/api/route_editor"); } catch (e) { return err(e); }
+  const inp = $("#route-url"); if (!inp.value) inp.value = r.url;
+  const url = inp.value || r.url, fr = $("#route-frame");
+  $("#route-open").href = url;
+  if (r.reachable && fr.dataset.src !== url) { fr.src = url; fr.dataset.src = url; }
+  routeStatus(r);
+  clearInterval(routeTimer);
+  routeTimer = setInterval(async () => {
+    if (state.view !== "routes") return;
+    try {
+      const rr = await api("/api/route_editor");
+      const was = $("#route-frame").hidden;
+      routeStatus(rr);
+      if (rr.reachable && was) { fr.src = url; fr.dataset.src = url; }
+    } catch (e) { /* keep the last status */ }
+  }, 5000);
+}
+$("#route-url").addEventListener("change", () => { const fr = $("#route-frame"); fr.src = $("#route-url").value; fr.dataset.src = fr.src; $("#route-open").href = fr.src; });
+
+// ---- map view: the route editor's map mode (map + robot + lidar scans), embedded ----
+let mapTimer = null;
+async function loadMapView() {
+  let r; try { r = await api("/api/route_editor?scope=map"); } catch (e) { return err(e); }
+  const url = r.url + "3d", fr = $("#map-frame"), s = $("#map-status");   // the 3D view by default; its "2D map" button switches
+  document.querySelectorAll('input[name="map-source"]').forEach((x) => { x.checked = x.value === r.source; });
+  $("#map-open").href = url;
+  const show = (rr) => {
+    const i = rr.info || {};
+    if (rr.reachable) { s.textContent = `● ${rr.source === "sim" ? "SIM · " : ""}map ${i.map || "?"} · ${i.pose ? `robot (${i.pose.x.toFixed(2)}, ${i.pose.y.toFixed(2)})` : "no robot pose: " + (i.ros || "—")}`; s.className = "mono ok"; }
+    else { s.textContent = "○ map page not running"; s.className = "mono muted"; }
+    $("#map-hint").hidden = rr.reachable; fr.hidden = !rr.reachable;
+    if (rr.reachable && fr.dataset.src !== url) { fr.src = url; fr.dataset.src = url; }
+  };
+  show(r);
+  clearInterval(mapTimer);
+  mapTimer = setInterval(async () => { if (state.view !== "map") return; try { show(await api("/api/route_editor?scope=map")); } catch (e) { /* keep */ } }, 5000);
+}
+
+// the Map tab's live / sim switch: which route editor the Map tab embeds (its 3D button stays inside it)
+document.querySelectorAll('input[name="map-source"]').forEach((r) => r.addEventListener("change", async () => {
+  if (!r.checked) return;
+  const s = $("#map-status");
+  if (r.value === "sim") { s.textContent = "● starting the simulator on the manager's host…"; s.className = "mono muted"; }
+  let d; try { d = await api("/api/map_source", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: r.value }) }); } catch (e) { return err(e); }
+  if (d.start && d.start.error) err(new Error(d.start.error));
+  { const fr = $("#map-frame"); fr.removeAttribute("src"); delete fr.dataset.src; fr.hidden = true; }
+  if (state.view === "map") loadMapView();
+}));
+
+// ---- Services view: supervisor's units on the robot PC, native (XML-RPC through the manager) ----
+let servicesTimer = null;
+const svcOpenLogs = {};                      // name -> "stdout" | "stderr" (log rows kept open across refreshes)
+function svcUptime(s) { if (s == null) return ""; const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`; }
+async function svcAction(name, action) {
+  try { await post(`/api/services/${encodeURIComponent(name)}`, { action }); toast(`${action}: ${name}`, "ok"); }
+  catch (e) { err(e); }
+  renderServices();
+}
+async function svcLog(name, stream, pre) {
+  pre.textContent = "loading…";
+  try { const d = await api(`/api/services/${encodeURIComponent(name)}/log?stream=${stream}&lines=120`); pre.textContent = d.lines.join("\n") || "(empty)"; pre.scrollTop = pre.scrollHeight; }
+  catch (e) { pre.textContent = String(e); }
+}
+async function renderServices() {
+  let d; try { d = await api("/api/services"); } catch (e) { return err(e); }
+  const s = $("#services-status");
+  $("#services-open").href = d.url.replace(/\/RPC2$/, "/");
+  const job = $("#services-job");
+  if (d.job && (d.job.running || (d.job.log || []).length)) { job.hidden = false; job.textContent = (d.job.running ? "restarting base stack: " : "last base restart: ") + (d.job.log || []).join(" · "); job.classList.toggle("on", d.job.running); }
+  else job.hidden = true;
+  $("#btn-restart-base").disabled = !d.reachable || !!(d.job && d.job.running);
+  if (!d.reachable) { s.textContent = "○ supervisor not reachable (robot off?)"; s.className = "mono muted"; $("#services-wrap").replaceChildren(el("div", { class: "muted", style: "padding: 14px" }, d.error || "")); return; }
+  const n = d.services.length, run = d.services.filter((x) => x.state === "RUNNING").length;
+  s.textContent = `● ${run} of ${n} running`; s.className = "mono ok";
+  const tbody = el("tbody");
+  for (const x of d.services) {
+    const st = x.state.toLowerCase();
+    const can = { start: x.state !== "RUNNING" && x.state !== "STARTING", stop: x.state === "RUNNING" || x.state === "STARTING", restart: true };
+    const logBtn = el("button", { class: "btn", title: "tail of the unit's log" }, svcOpenLogs[x.name] ? "hide log" : "log");
+    const row = el("tr", { class: "svc-row" },
+      el("td", { class: "name" }, x.name),
+      el("td", {}, el("span", { class: `badge-status ${st}` }, x.state)),
+      el("td", { class: "mono muted" }, x.pid ? `pid ${x.pid} · ${svcUptime(x.uptime_s)}` : (x.description || "")),
+      el("td", { class: "acts" },
+        el("button", { class: "btn", disabled: !can.start, onclick: () => svcAction(x.name, "start") }, "start"),
+        el("button", { class: "btn", disabled: !can.stop, onclick: () => svcAction(x.name, "stop") }, "stop"),
+        el("button", { class: "btn", disabled: !can.restart, onclick: () => svcAction(x.name, "restart") }, "restart"),
+        logBtn));
+    tbody.appendChild(row);
+    if (svcOpenLogs[x.name]) {
+      const pre = el("pre", { class: "svc-log" });
+      const bar = el("div", { class: "svc-logbar" },
+        ...["stdout", "stderr"].map((sname) => el("button", { class: "btn" + (svcOpenLogs[x.name] === sname ? " active" : ""), onclick: () => { svcOpenLogs[x.name] = sname; svcLog(x.name, sname, pre); renderServices(); } }, sname)),
+        el("button", { class: "btn", onclick: () => svcLog(x.name, svcOpenLogs[x.name], pre) }, "↻"),
+        el("span", { class: "muted" }, x[svcOpenLogs[x.name]] || ""));
+      tbody.appendChild(el("tr", { class: "svc-log" }, el("td", { colspan: 4 }, bar, pre)));
+      svcLog(x.name, svcOpenLogs[x.name], pre);
+    }
+    logBtn.onclick = () => { if (svcOpenLogs[x.name]) delete svcOpenLogs[x.name]; else svcOpenLogs[x.name] = "stdout"; renderServices(); };
+  }
+  const table = el("table", { class: "svc" }, el("thead", {}, el("tr", {}, el("th", {}, "unit"), el("th", {}, "state"), el("th", {}, "pid · uptime"), el("th", {}, ""))), tbody);
+  $("#services-wrap").replaceChildren(table);
+}
+async function loadServicesView() {
+  await renderServices();
+  clearInterval(servicesTimer);
+  servicesTimer = setInterval(() => { if (state.view === "services" && !Object.keys(svcOpenLogs).length) renderServices(); }, 4000);
+}
+$("#btn-services-refresh").onclick = renderServices;
+$("#btn-restart-base").onclick = async () => { if (!confirm("Restart robot_disco, then localization, navigation and the collision monitor, in order (about 45 s)? The robot must be stationary.")) return; try { await post("/api/services/restart_base", {}); } catch (e) { err(e); } renderServices(); };
+
+// ---- "record cmd": the exact teleop launch line that appends to a dataset ----
+function recordCmd(d) {
+  const sq = d.capture && d.capture.squares ? d.capture.squares : null;
+  const task = d.tasks && d.tasks.length ? d.tasks[0] : "";
+  let cmd = `./run.sh -m ur5e_lerobot.teleop.manual_panel --engine hardware --cameras udp --input spacemouse --resume` +
+    ` --root outputs/datasets/${d.name} --repo_id local/${d.name} --task "${task.replace(/"/g, '\\"')}"`;
+  if (d.media === "video") cmd += " --use-videos";
+  if (sq) { if (sq.scene != null) cmd += ` --scene-square ${sq.scene}`; if (sq.side != null) cmd += ` --side-square ${sq.side}`; }
+  return cmd;
+}
+async function copyRecordCmd(d) {
+  const cmd = recordCmd(d);
+  try { await navigator.clipboard.writeText(cmd); ok("record command copied"); }
+  catch (e) { window.prompt("copy the launch line:", cmd); }
+}
 
 loadDatasets();
 setInterval(() => loadDatasets(true), 4000);          // folder monitor (datasets view)

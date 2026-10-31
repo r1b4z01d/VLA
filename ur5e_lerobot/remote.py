@@ -126,6 +126,21 @@ class RemotePolicyClient:
         send_msg(self.sock, {"cmd": "reset"})
         recv_msg(self.sock)  # ack
 
+    def info(self) -> dict:
+        """What the server is serving: resolved checkpoint path, reactivity flags. {} on an old server
+        that does not know the message (it would treat it as an observation and return an error)."""
+        send_msg(self.sock, {"cmd": "info"})
+        rep = recv_msg(self.sock)
+        return rep if isinstance(rep, dict) and rep.get("ok") else {}
+
+    def select(self, model: str) -> dict:
+        """Make a multi-model server serve `model` (run name, checkpoint path or realpath): instant
+        when it is resident. Returns the server's reply ({'ok': True, ...info} or {'ok': False,
+        'error': ...}); an old server answers with an 'error' (it took the message for an observation)."""
+        send_msg(self.sock, {"cmd": "select", "model": model})
+        rep = recv_msg(self.sock)
+        return rep if isinstance(rep, dict) else {"ok": False, "error": "bad reply"}
+
     def close(self) -> None:
         if self.sock is not None:
             try:
@@ -135,10 +150,12 @@ class RemotePolicyClient:
             self.sock = None
 
 
-def serve(host: str, port: int, infer_fn, reset_fn=None) -> None:
+def serve(host: str, port: int, infer_fn, reset_fn=None, info_fn=None, cmd_fn=None) -> None:
     """Blocking single-client server. `infer_fn(state, images: dict, task) -> action` (array or list),
-    where `images` maps camera name -> RGB array. Handles a {'cmd':'reset'} control message and survives
-    client reconnects."""
+    where `images` maps camera name -> RGB array. Handles {'cmd':'reset'} and {'cmd':'info'} control
+    messages and survives client reconnects. `info_fn() -> dict` describes what is being served
+    (resolved checkpoint, reactivity flags) so the client can RECORD it: an eval that only knows
+    "127.0.0.1:8777" cannot later be grouped by model, which is how 136 runs ended up unattributable."""
     import numpy as np
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -157,6 +174,20 @@ def serve(host: str, port: int, infer_fn, reset_fn=None) -> None:
                     if reset_fn is not None:
                         reset_fn()
                     send_msg(conn, {"ok": True})
+                    continue
+                if isinstance(msg, dict) and msg.get("cmd") == "info":
+                    try:
+                        send_msg(conn, {"ok": True, **(info_fn() if info_fn is not None else {})})
+                    except Exception as e:  # noqa: BLE001
+                        send_msg(conn, {"ok": False, "error": repr(e)})
+                    continue
+                if isinstance(msg, dict) and "cmd" in msg:     # other control messages (e.g. select)
+                    try:
+                        rep = cmd_fn(msg) if cmd_fn is not None else None
+                        send_msg(conn, rep if isinstance(rep, dict) else
+                                 {"ok": False, "error": f"unknown cmd {msg.get('cmd')!r}"})
+                    except Exception as e:  # noqa: BLE001
+                        send_msg(conn, {"ok": False, "error": repr(e)})
                     continue
                 state, images, task = decode_obs(msg)
                 try:

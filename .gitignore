@@ -29,3 +29,9 @@ ros2_ws/log/
 .vscode/
 .venv-v05
 .venv-044
+
+# per-machine Claude Code permissions
+.claude/settings.local.json
+
+# per-robot arguments for the vla_teleop / vla_eval units (created by install_services.sh rd)
+config/*.env

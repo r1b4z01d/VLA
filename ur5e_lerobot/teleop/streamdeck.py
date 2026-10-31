@@ -10,6 +10,10 @@ Test:  ~/VLA/run.sh -m ur5e_lerobot.teleop.streamdeck   (prints key up/down even
 from __future__ import annotations
 
 
+_EMOJI_FONT = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"   # Ubuntu: fonts-noto-color-emoji
+_EMOJI_EXTRA = {"✊", "✋", "👍", "👎", "✅"}   # below U+1F000 but not in DejaVu: render as emoji too
+
+
 class StreamDeckPad:
     """Thin wrapper: open the deck, render text labels, and report key up/down via a callback."""
 
@@ -36,6 +40,7 @@ class StreamDeckPad:
         return self
 
     def set_label(self, key: int, text: str, bg=(25, 25, 25), fg=(240, 240, 240)) -> None:
+        """Draw `text` (lines split on \\n) centred on the key; a single emoji becomes a colour icon."""
         if self.deck is None or not (0 <= key < self.key_count):
             return
         from PIL import Image, ImageDraw, ImageFont
@@ -43,12 +48,44 @@ class StreamDeckPad:
 
         img = PILHelper.create_image(self.deck, background=bg)
         draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 13)
-        except Exception:  # noqa: BLE001
-            font = ImageFont.load_default()
         lines = text.split("\n")
         w, h = img.size
+        # A lone emoji (🗑 💾 …) is not in DejaVu: render it with the colour emoji font, which only
+        # exists as 109 px bitmaps, and scale it onto the key. Falls through to text if that fails.
+        if len(lines) == 1 and text and all(ord(c) >= 0x1F000 or c in _EMOJI_EXTRA or c == "\ufe0f" for c in text):
+            try:
+                emoji = ImageFont.truetype(_EMOJI_FONT, 109)
+                big = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+                ImageDraw.Draw(big).text((20, 10), text, font=emoji, embedded_color=True)
+                bb = big.getbbox()
+                if bb:
+                    glyph = big.crop(bb)
+                    side = int(min(w, h) * 0.78)
+                    scale = min(side / glyph.width, side / glyph.height)
+                    glyph = glyph.resize((max(1, int(glyph.width * scale)), max(1, int(glyph.height * scale))), Image.LANCZOS)
+                    img = img.convert("RGBA")
+                    img.alpha_composite(glyph, ((w - glyph.width) // 2, (h - glyph.height) // 2))
+                    img = img.convert("RGB")
+                    if self.flip:
+                        img = img.transpose(Image.ROTATE_180)
+                    self.deck.set_key_image(self._phys(key), PILHelper.to_native_format(self.deck, img))
+                    return
+            except Exception:  # noqa: BLE001 — no emoji font on this box: draw the text instead
+                pass
+        # Bold, and as large as the widest line allows on this key (72 or 96 px): "1\nOPEN" gets the
+        # big size, "Discard" or "CLOSE ALL" shrink until they fit with a 4 px margin per side.
+        font = None
+        for size in (44, 36, 30, 26, 22, 20, 18, 16, 14, 12):   # a lone icon fills the key
+            try:
+                cand = ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+            except Exception:  # noqa: BLE001
+                break
+            widest = max((cand.getbbox(ln)[2] - cand.getbbox(ln)[0]) for ln in lines) if lines else 0
+            font = cand
+            if widest <= w - 8 and (cand.getbbox("Ag")[3] - cand.getbbox("Ag")[1] + 4) * len(lines) <= h - 6:
+                break
+        if font is None:
+            font = ImageFont.load_default()
         # vertically center the block of lines
         line_h = (font.getbbox("Ag")[3] - font.getbbox("Ag")[1]) + 3
         y = (h - line_h * len(lines)) // 2

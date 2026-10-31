@@ -34,32 +34,55 @@ def scripted_action(step: int, period: int, home: list[float]) -> list[float]:
     return Action(tuple(ee[:6]), tuple(curls)).to_vector()
 
 
+def camera_shapes(width: int, height: int) -> dict:
+    """Per-camera output (w, h) for the HARDWARE engine, from cameras.py's ROTATE/SQUARE constants.
+
+    (width, height) is the box each camera fits INTO, not its shape: a sideways-mounted cam yields a
+    portrait frame and a square-cropped one a square, so the dataset must declare a shape per camera.
+    """
+    from ..sensors.cameras import (SCENE_ROTATE, SCENE_SQUARE, SIDE_ROTATE, SIDE_SQUARE,
+                                   WRIST_ROTATE, WRIST_SQUARE, out_size)
+
+    return {"scene": out_size(SCENE_ROTATE, SCENE_SQUARE, width, height),
+            "wrist": out_size(WRIST_ROTATE, WRIST_SQUARE, width, height),
+            "side": out_size(SIDE_ROTATE, SIDE_SQUARE, width, height)}
+
+
 def build_features(width: int, height: int, use_videos: bool, with_wrist: bool = True,
-                   with_side: bool = False) -> dict:
+                   with_side: bool = False, shapes: "dict | None" = None) -> dict:
+    """`shapes` (hardware only): camera name -> (w, h) from `camera_shapes`. Sim renderers return
+    exactly (width, height), so sim callers pass nothing and every camera keeps the box size."""
     img_dtype = "video" if use_videos else "image"
 
-    def img():
-        return {"dtype": img_dtype, "shape": (height, width, 3), "names": ["height", "width", "channel"]}
+    def img(name: str = ""):
+        w, h = shapes.get(name, (width, height)) if shapes else (width, height)
+        return {"dtype": img_dtype, "shape": (h, w, 3), "names": ["height", "width", "channel"]}
 
     feats = {
         "observation.state": {"dtype": "float32", "shape": (STATE_DIM,), "names": list(STATE_NAMES)},
-        "observation.images.scene": img(),
+        "observation.images.scene": img("scene"),
         "action": {"dtype": "float32", "shape": (ACTION_DIM,), "names": list(ACTION_NAMES)},
     }
     if with_wrist:
-        feats["observation.images.wrist"] = img()
+        feats["observation.images.wrist"] = img("wrist")
     if with_side:
-        feats["observation.images.side"] = img()  # 2nd 3rd-person view (occlusion coverage)
+        feats["observation.images.side"] = img("side")  # 2nd 3rd-person view (occlusion coverage)
     return feats
 
 
 def make_engine(engine: str, settle_steps: int = 40, *, robot_ip: str = "192.168.11.21",
-                hand_host: str = "192.168.11.117", scene_cam=None, wrist_cam=None, side_cam=None):
+                hand_host: str = "192.168.11.117", scene_cam=None, wrist_cam=None, side_cam=None,
+                cameras: str = "local", camera_host: str = "127.0.0.1", hand_transport: str = "udp"):
     """Return (robot, scene_render_fn, wrist_render_fn, side_render_fn). wrist/side are None if absent.
 
     engine: 'mujoco' (sim), 'kinematic' (fast stub), or 'hardware' (real UR5e via RTDE +
     AmazingHand TCP + USB cameras). The hardware kwargs are ignored by the sim engines.
     side_cam: None disables the 2nd scene cam; True uses cameras.SIDE_CAM; or pass a device path.
+    cameras: 'local' opens the USB cameras in THIS process (exclusive — nothing else can use them);
+             'udp' subscribes to the camera service (scripts/camera_server.py, supervisor unit
+             vla_cameras) that owns them, so teleop, eval, the ROS bridge and the GPU box can all
+             watch at once and the operator's exposure survives between launches. `camera_host` is
+             where that service's control port lives (the frames themselves arrive by multicast).
     """
     cfg = URAmazingHandConfig(id="sim", cameras={})
     if engine == "mujoco":
@@ -78,29 +101,71 @@ def make_engine(engine: str, settle_steps: int = 40, *, robot_ip: str = "192.168
         from ..hand import AmazingHandClient
         from ..robot.rtde_arm import RtdeArmInterface
         from ..sensors import UsbCamera
-        from ..sensors.cameras import (SCENE_CAM, SCENE_GAIN, SCENE_ROTATE, SIDE_CAM,
-                                        SIDE_GAIN, SIDE_ROTATE, WRIST_CAM, WRIST_GAIN,
-                                        WRIST_ROTATE)
+        from ..sensors.cameras import (SCENE_AUTO_EXPOSURE, SCENE_CAM, SCENE_EXPOSURE, SCENE_GAIN,
+                                        SCENE_ROTATE, SCENE_SQUARE, SIDE_AUTO_EXPOSURE, SIDE_CAM,
+                                        SIDE_EXPOSURE, SIDE_GAIN, SIDE_ROTATE, SIDE_SQUARE,
+                                        WRIST_AUTO_EXPOSURE, WRIST_CAM, WRIST_EXPOSURE, WRIST_GAIN,
+                                        WRIST_ROTATE, WRIST_SQUARE)
 
         scene_cam = SCENE_CAM if scene_cam is None else scene_cam  # stable device paths by default
         wrist_cam = WRIST_CAM if wrist_cam is None else wrist_cam
         if side_cam is True:  # enable the 2nd scene cam using the configured default port
             side_cam = SIDE_CAM
-        robot = URAmazingHand(cfg, arm=RtdeArmInterface(robot_ip), hand=AmazingHandClient(hand_host))
+        robot = URAmazingHand(cfg, arm=RtdeArmInterface(robot_ip),
+                              hand=AmazingHandClient(hand_host, transport=hand_transport))
+
+        if cameras == "udp":
+            # Frames come from the camera service; this process never touches /dev/video*. The
+            # service applies the same ROTATE/SQUARE constants, so `camera_shapes()` still predicts
+            # the geometry. Each grab fn carries `.cam` (a CameraProxy) exactly like `_grab` below,
+            # so the launch-time exposure flow in the panel/eval is unchanged.
+            from ..sensors.camera_stream import open_stream, service_cameras
+
+            names = ["scene", "wrist"]
+            if side_cam is None:
+                # Auto: record every camera the service publishes. The eval always feeds three, so a
+                # dataset silently missing the side view trains a model the eval can't drive (seen
+                # 2026-10-24: a panel launched without --side-cam showed a blank side tile and was
+                # about to record a two-camera dataset). If the service can't be asked, assume the
+                # full set and let open_stream fail loudly rather than drop a camera on a guess.
+                have = service_cameras(camera_host)
+                if have is None or "side" in have:
+                    names.append("side")
+                print(f"[cam] camera service on {camera_host} publishes "
+                      f"{sorted(have) if have is not None else 'unknown'}; using {names}", flush=True)
+            elif side_cam:
+                names.append("side")
+            _sub, grabs = open_stream(camera_host, names)
+            return robot, grabs["scene"], grabs["wrist"], grabs.get("side")
 
         def _grab(cam: UsbCamera):
             def read(w, h):  # lazy-connect on first render (after robot.connect brings up arm+hand)
                 if not cam.is_connected:
-                    cam.connect()
+                    try:
+                        cam.connect()
+                    except Exception as e:  # noqa: BLE001
+                        # The usual reason on the robot PC: the camera SERVICE owns /dev/video*. A
+                        # restart can't help here (it would grab them again) — say so instead.
+                        from ..sensors.camera_stream import SERVICE_UNIT, service_status
+                        st = service_status("127.0.0.1")
+                        hint = (f" — {st}: the camera service owns the devices; launch with --cameras udp"
+                                if "RUNNING" in st else "")
+                        raise RuntimeError(f"{e}{hint}") from e
                 return cam.read(w, h)
+            read.cam = cam   # expose the object: the launch-time exposure flow needs to drive it
             return read
 
         # Per-camera mount orientation lives in cameras.py (SCENE/WRIST/SIDE_ROTATE) so it's tweakable in
         # one place while dialing in the physical mounts — watch the live panel and adjust those constants.
-        side_fn = (_grab(UsbCamera(side_cam, rotate=SIDE_ROTATE, gain=SIDE_GAIN))
+        side_fn = (_grab(UsbCamera(side_cam, rotate=SIDE_ROTATE, gain=SIDE_GAIN, square=SIDE_SQUARE,
+                                   auto_exposure=SIDE_AUTO_EXPOSURE, exposure=SIDE_EXPOSURE))
                    if side_cam else None)
-        return (robot, _grab(UsbCamera(scene_cam, rotate=SCENE_ROTATE, gain=SCENE_GAIN)),
-                _grab(UsbCamera(wrist_cam, rotate=WRIST_ROTATE, gain=WRIST_GAIN)), side_fn)
+        return (robot,
+                _grab(UsbCamera(scene_cam, rotate=SCENE_ROTATE, gain=SCENE_GAIN, square=SCENE_SQUARE,
+                                auto_exposure=SCENE_AUTO_EXPOSURE, exposure=SCENE_EXPOSURE)),
+                _grab(UsbCamera(wrist_cam, rotate=WRIST_ROTATE, gain=WRIST_GAIN, square=WRIST_SQUARE,
+                                auto_exposure=WRIST_AUTO_EXPOSURE, exposure=WRIST_EXPOSURE)),
+                side_fn)
 
     from .amazing_hand_mujoco import AmazingHandMujoco
     from .sim_arm import SimArm

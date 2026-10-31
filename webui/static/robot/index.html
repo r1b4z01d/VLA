@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot</title>
+  <link rel="icon" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/robot/robot.css">
+</head>
+<body class="robot">
+
+  <div id="fault" class="fault hidden">
+    <span id="fault-text"></span>
+    <button class="btn danger" data-cmd="reconnect">Recover</button>
+  </div>
+
+  <main class="rb-main">
+    <section class="rb-left">
+      <!-- teleop action bar -->
+      <div class="actions only-teleop">
+        <button class="btn big rec" id="btn-rec" data-cmd="rec" title="r">● REC</button>
+        <button class="btn big save" data-cmd="save" title="s">■ SAVE</button>
+        <button class="btn big" data-cmd="discard" title="d">DISCARD</button>
+        <button class="btn big" id="btn-home" data-cmd="home" title="h">⌂ HOME</button>
+        <button class="btn big" id="btn-free" data-cmd="freedrive" title="f">FREEDRIVE</button>
+        <button class="btn big" data-cmd="grasp_mark" title="g">⚑ +GRASP</button>
+        <div class="pills" id="pills">
+          <span class="pill" id="pill-ur">UR —</span>
+          <span class="pill" id="pill-hand">hand —</span>
+          <span class="pill" id="pill-tick">— tick/s</span>
+          <span class="pill" id="pill-servo" title="servo stream">servo —</span>
+          <span class="pill" id="pill-sync">link —</span>
+        </div>
+        <button class="btn hold" data-hold="-1" title="hold: o">🖐 open</button>
+        <button class="btn hold" data-hold="1" title="hold: c">✊ close</button>
+        <button class="btn" data-cmd="reconnect" title="reconnect the UR (clears a protective stop, reloads the control script)">🦾🔄</button>
+        <button class="btn" data-cmd="recover_hand" title="recover the hand (power-cycle the tool, reconnect)">🖐🔄</button>
+        <button class="btn danger" data-cmd="quit" data-confirm="Quit the teleop panel? An unsaved episode is dropped and the UR is powered down." title="quit the panel (the Tk window is hidden in --ui web)">⏻</button>
+      </div>
+
+      <!-- eval action bar -->
+      <div class="actions only-eval">
+        <button class="btn big play" id="btn-play" data-cmd="play" title="p">▶ PLAY</button>
+        <button class="btn big" id="btn-efree" data-cmd="freedrive" title="f">FREEDRIVE</button>
+        <button class="btn big" data-cmd="reset" title="r">RESET</button>
+        <button class="btn big" id="btn-ehome" data-cmd="home" title="h">⌂ HOME</button>
+        <button class="btn big" data-cmd="newrun" title="n">NEW RUN</button>
+        <span id="pills-eval-slot"></span>
+        <button class="btn" data-cmd="open_hand" title="o">🖐 open</button>
+        <button class="btn" data-cmd="close_hand" title="c">✊ close</button>
+        <button class="btn danger" data-cmd="exit" data-confirm="Exit the eval? The current run is closed.">EXIT</button>
+      </div>
+
+      <div class="cam-wall">
+        <figure class="cam croppable" data-cam="scene"><img alt="scene"><figcaption>scene <span class="crop-tag"></span></figcaption><div class="nosig">no signal</div></figure>
+        <figure class="cam croppable" data-cam="side"><img alt="side"><figcaption>side <span class="crop-tag"></span></figcaption><div class="nosig">no signal</div></figure>
+        <figure class="cam wide" data-cam="wrist"><img alt="wrist"><figcaption>wrist</figcaption><div class="nosig">no signal</div></figure>
+      </div>
+
+      <div class="cards-grid">
+      <!-- task + input (teleop) -->
+      <section class="card only-teleop">
+        <h3>Dataset</h3>
+        <input class="text mono" id="dataset-name" placeholder="dataset name (Enter to switch)" title="switch the recording root (not while recording); a new name creates a new dataset, an existing one appends">
+        <h3 class="sub">Task</h3>
+        <input class="text" id="task" placeholder="task string (Enter to apply)">
+      </section>
+
+      <!-- episode (teleop) -->
+      <section class="card only-teleop">
+        <h3>Episode</h3>
+        <div class="big-stat"><span id="rec-state">idle</span> <span class="mono" id="rec-time"></span></div>
+        <div class="kv mono"><span>frames</span><b id="ep-frames">0</b><span>grasps</span><b id="ep-grasps">1</b><span>episodes</span><b id="ep-count">0</b></div>
+      </section>
+
+      <!-- exposure (both modes) -->
+      <section class="card">
+        <h3>Exposure <span class="tag" id="expo-lock">—</span></h3>
+        <div class="expo-cams" id="expo-cams"></div>
+        <div class="row expo-row"><span class="muted small">all</span>
+          <button class="btn" data-cmd="expo" data-args='{"action":"auto"}'>auto</button>
+          <button class="btn" data-cmd="expo" data-args='{"action":"minus"}'>−</button>
+          <button class="btn" data-cmd="expo" data-args='{"action":"plus"}'>+</button>
+          <button class="btn accent" data-cmd="expo" data-args='{"action":"lock"}'>lock</button>
+        </div>
+      </section>
+
+      <!-- crop (teleop) -->
+      <section class="card only-teleop">
+        <h3>Crop <span class="muted" id="crop-note"></span></h3>
+        <label class="slider">scene <input type="range" min="0" max="100" step="5" data-crop="scene"><span class="val mono">—</span></label>
+        <label class="slider">side &nbsp;<input type="range" min="0" max="100" step="5" data-crop="side"><span class="val mono">—</span></label>
+        <div class="muted small card-foot">Fraction along the long axis: 0.40 shelf, 1.0 floor. Written to capture.json when the dataset is created.</div>
+      </section>
+
+      <!-- last saved + rating (teleop) -->
+      <section class="card only-teleop">
+        <h3>Last saved <span class="mono" id="last-ep"></span></h3>
+        <div class="stars" id="stars-teleop"></div>
+        <input class="text" id="notes" placeholder="notes (Enter to save)">
+        <div class="muted small" id="last-upload"></div>
+      </section>
+
+      <!-- model + server (eval) -->
+      <section class="card only-eval">
+        <h3>Model</h3>
+        <div class="kv mono" id="model-kv">—</div>
+      </section>
+      <section class="card only-eval">
+        <h3>Run <span class="mono" id="run-id"></span></h3>
+        <div class="big-stat"><span id="run-state">paused</span> <span class="mono" id="run-time"></span></div>
+        <div class="kv mono" id="run-kv">—</div>
+        <div class="stars" id="stars-eval"></div>
+        <div class="muted small">rate the run on the stars (also deck row 3), then NEW RUN</div>
+      </section>
+      <section class="card only-eval">
+        <h3>Runs this session</h3>
+        <div class="runs mono" id="runs"></div>
+      </section>
+
+      <section class="card">
+        <h3>Arm</h3>
+        <div class="kv mono" id="arm-kv">—</div>
+      </section>
+      </div>
+
+      <div class="log-wrap" id="log-wrap">
+        <div class="log-head" id="log-toggle" title="click to collapse / expand"><span class="log-title"><span class="caret">▾</span> log</span><span class="log-last mono" id="log-last"></span><span class="muted mono" id="log-count"></span></div>
+        <pre class="log mono" id="log"></pre>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/robot/robot.js"></script>
+</body>
+</html>

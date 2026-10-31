@@ -14,10 +14,33 @@ Coordinates are in the UR base frame (same frame as the EE pose / RTDE `getActua
 """
 from __future__ import annotations
 
+import json
+import os
 from math import pi
 
+
+def _calib_path() -> str:
+    # <repo>/outputs/workspace_calib.json — repo root is 3 dirs up from this file
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "outputs", "workspace_calib.json")
+
+
+def load_workspace_calib() -> dict:
+    """Workspace limits captured by scripts/calibrate_workspace.py (freedrive point-and-capture).
+    Returns {} if the file is absent/unreadable, so callers fall back to the hardcoded defaults."""
+    try:
+        with open(_calib_path()) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+_CALIB = load_workspace_calib()
+
 # No-go rectangle (xmin, xmax, ymin, ymax), in metres, in the UR base frame — the robot's body (+y).
-NO_GO_XY = (-0.27, 0.27, 0.0, 0.88)
+# Overridden by outputs/workspace_calib.json["no_go_xy"] when present (calibrate_workspace.py).
+NO_GO_XY = tuple(_CALIB["no_go_xy"]) if _CALIB.get("no_go_xy") else (-0.27, 0.27, 0.0, 0.88)
 NO_GO_MARGIN = 0.03  # keep-out buffer (m) added around the rectangle
 LINK_MARGIN = 0.06   # larger buffer for the elbow/wrist LINK check (links have radius; joints are points)
 

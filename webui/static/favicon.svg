@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <radialGradient id="ball" cx="38%" cy="34%" r="72%">
+      <stop offset="0%" stop-color="#f2f8ff"/>
+      <stop offset="45%" stop-color="#9ec3e6"/>
+      <stop offset="100%" stop-color="#3a5f8a"/>
+    </radialGradient>
+    <clipPath id="clip"><circle cx="16" cy="18" r="12.5"/></clipPath>
+  </defs>
+  <!-- hanger -->
+  <path d="M16 2v4" stroke="#9aa3ad" stroke-width="1.3" stroke-linecap="round"/>
+  <rect x="14.3" y="5.4" width="3.4" height="2.2" rx="0.6" fill="#b8c0c8"/>
+  <!-- ball -->
+  <circle cx="16" cy="18" r="12.5" fill="url(#ball)"/>
+  <!-- facet grid -->
+  <g clip-path="url(#clip)" stroke="#2c4c72" stroke-width="0.7" opacity="0.55" fill="none">
+    <path d="M2 11.5h28M2 15h28M2 18.5h28M2 22h28M2 25.5h28"/>
+    <path d="M8 5v26M12 5v26M16 5v26M20 5v26M24 5v26"/>
+  </g>
+  <!-- bright mirror tiles -->
+  <g clip-path="url(#clip)" fill="#ffffff">
+    <rect x="8.6" y="11.8" width="2.6" height="2.6" opacity="0.95"/>
+    <rect x="17" y="15.4" width="2.6" height="2.6" opacity="0.9"/>
+    <rect x="12.4" y="22" width="2.6" height="2.6" opacity="0.85"/>
+    <rect x="20.6" y="19" width="2.4" height="2.4" opacity="0.8"/>
+  </g>
+  <!-- sparkle -->
+  <path d="M27 7.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z" fill="#ffe07a"/>
+</svg>

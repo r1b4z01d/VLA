@@ -1,7 +1,7 @@
 """FastAPI backend + static frontend for the dataset-management web UI.
 
     HF_HUB_OFFLINE=1 PYTHONPATH=. .venv/bin/python -m webui.server --host 0.0.0.0 --port 8080
-    # then browse from the Mac at  http://192.168.11.130:8080
+    # then browse from the Mac at  http://192.168.11.119:8081
 
 Read endpoints (GET) scan parquet metadata only (instant). Mutating endpoints (POST) delegate to
 webui.ops; destructive ones require {"confirm": true}. The folder monitor is client-side polling of
@@ -20,6 +20,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 
 from . import datasets as ds_mod
@@ -164,6 +165,16 @@ def api_restore(name: str):
     return _run(ops.restore_backup, DATASETS_DIR, name)
 
 
+@app.post("/api/datasets/{name}/train")
+def api_train(name: str, payload: dict = Body(default={})):
+    """Kick off a training run on this dataset (on THIS host's GPU); appears in the Models tab."""
+    _guard(name)
+    return _run(models_mod.start_training, REPO_ROOT, DATASETS_DIR, name,
+                payload.get("policy", "smolvla"), payload.get("steps", 20000),
+                payload.get("batch_size", 64), payload.get("save_freq", 2500),
+                dry_run=bool(payload.get("dry_run", False)))
+
+
 @app.post("/api/datasets/{name}/rename")
 def api_rename_dataset(name: str, payload: dict = Body(...)):
     _guard(name)
@@ -284,6 +295,23 @@ def api_eval_create(payload: dict = Body(...)):
     return _run(evals_mod.create_eval, REPO_ROOT, payload["name"], payload)
 
 
+@app.post("/api/evals/bulk_annotate")
+def api_evals_bulk_annotate(payload: dict = Body(...)):
+    """Set the same fields on many evals at once — e.g. assign a model/checkpoint to every run in an
+    'unassigned' group after the fact. {names: [...], fields: {...}}"""
+    names = payload.get("names") or []
+    fields = payload.get("fields") or {}
+    if not names or not isinstance(fields, dict):
+        raise HTTPException(400, "bulk_annotate needs names[] and fields{}")
+    return _run(evals_mod.bulk_annotate, REPO_ROOT, [str(n) for n in names], fields)
+
+
+@app.get("/api/evals/groups")
+def api_evals_groups():
+    """Per-model roll-up: run count, rated count, combined (mean) rating, success rate."""
+    return {"groups": _run(evals_mod.group_summary, REPO_ROOT)}
+
+
 @app.post("/api/evals/{name}/annotate")
 def api_eval_annotate(name: str, payload: dict = Body(...)):
     _guard_plain(name)
@@ -327,11 +355,36 @@ def api_eval_video(name: str):
 
     _guard_plain(name)
     run = _run(evals_mod.eval_dir, REPO_ROOT, name)
-    vids = sorted(_g.glob(os.path.join(run, "*.mp4")))
+    vids = sorted(v for v in _g.glob(os.path.join(run, "*.mp4")) if not v.endswith(".h264.mp4"))
     if not vids:
         raise HTTPException(404, "no video for this eval")
-    return FileResponse(vids[0], media_type="video/mp4",
-                        headers={"Access-Control-Allow-Origin": "*"})
+    # The robot PC writes rollouts with cv2's "mp4v" fourcc = MPEG-4 Part 2 (ffprobe: codec mpeg4,
+    # Simple Profile). No browser decodes that in <video>, which is why the ▶ button showed a black
+    # player. The headless OpenCV wheel on the robot PC has no H.264 encoder, so the fix lives here:
+    # transcode to H.264 once on first request, cache it beside the original, serve the cache. Run
+    # niced and on two threads so a request during a training run cannot starve its dataloader.
+    src = vids[0]
+    h264 = src[:-4] + ".h264.mp4"
+    if not os.path.isfile(h264) or os.path.getmtime(h264) < os.path.getmtime(src):
+        import shutil as _sh
+        import subprocess as _sp
+        if _sh.which("ffmpeg"):
+            tmp = h264 + ".tmp.mp4"
+            r = _sp.run(["nice", "-n", "19", "ffmpeg", "-y", "-v", "error", "-threads", "2", "-i", src,
+                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                         "-movflags", "+faststart", "-an", tmp], capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and os.path.isfile(tmp):
+                os.replace(tmp, h264)
+            else:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                h264 = src          # serve the original rather than fail (download still works)
+        else:
+            h264 = src
+    return FileResponse(h264, media_type="video/mp4",
+                        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"})
 
 
 @app.on_event("shutdown")
@@ -344,23 +397,328 @@ def healthz():
     return JSONResponse({"ok": True, "datasets_dir": DATASETS_DIR})
 
 
+class _NoCacheStatic(StaticFiles):
+    """Serve the UI assets with `no-cache` so a redeploy is picked up on the next page load.
+
+    Not `no-store`: StaticFiles still sends an ETag, so the browser revalidates and normally gets a
+    304 with an empty body — nothing on a LAN. Without this, the default (no Cache-Control at all)
+    lets the browser heuristically cache app.js while revalidating index.html, so the row markup and
+    the header markup come from different deploys. That does not fail loudly; it silently shifts every
+    cell one column left and looks exactly like the new columns "not rendering".
+    """
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 def _mount_static():
     if os.path.isdir(STATIC_DIR):
-        app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+        app.mount("/", _NoCacheStatic(directory=STATIC_DIR, html=True), name="static")
 
 
+ROBOT_URL = os.environ.get("VLA_ROBOT_URL", "http://192.168.11.80:8090/")
+ROUTE_URL = os.environ.get("VLA_ROUTE_URL", "http://192.168.11.80:8092/")   # rd_ws/Scripts/route_editor.py on the robot
+# the map's source: the robot's route editor (live) or route_editor.py --sim (rd_ws/Scripts/dev_stack.sh,
+# normally on the box running this manager). The Map tab's live / sim switch picks it, for the Map and
+# 3D tabs only — the Teleop and Routes tabs always talk to the robot.
+SIM_ROUTE_URL = os.environ.get("VLA_SIM_ROUTE_URL", "http://127.0.0.1:8094/")   # 8094: never the live editor's 8092
+MAP_SOURCE = os.environ.get("VLA_MAP_SOURCE", "live")      # "live" | "sim"
+SIM_EDITOR = os.environ.get("VLA_SIM_EDITOR", "")          # rd_ws/Scripts/route_editor.py; "" = look next to this repo
+_sim_proc = None                                           # the simulator this manager started (switch -> sim)
+
+
+def _sim_editor_path() -> "str | None":
+    cands = ([SIM_EDITOR] if SIM_EDITOR else []) + [os.path.join(REPO_ROOT, "..", "rd_ws", "Scripts", "route_editor.py"),
+                                                     os.path.expanduser("~/rd_ws/Scripts/route_editor.py")]
+    for c in cands:
+        if c and os.path.isfile(c):
+            return os.path.abspath(c)
+    return None
+
+
+def _url_reachable(url: str, probe: str = "api/map", timeout: float = 1.0) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(_slash(url) + probe, timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def sim_start() -> dict:
+    """Switching the map to sim: start route_editor.py --sim here (the box running this manager) unless
+    something already answers at the sim URL. Same interpreter as the manager (numpy / Pillow / PyYAML)."""
+    global _sim_proc
+    from urllib.parse import urlparse
+    import subprocess
+    import sys
+    import time as _t
+    if _url_reachable(SIM_ROUTE_URL):
+        return {"reachable": True, "started": False}
+    path = _sim_editor_path()
+    if not path:
+        return {"reachable": False, "started": False, "error": "route_editor.py not found: set --sim-editor / VLA_SIM_EDITOR"}
+    if _sim_proc is not None and _sim_proc.poll() is None:
+        return {"reachable": False, "started": False, "error": f"simulator already starting (pid {_sim_proc.pid})"}
+    port = urlparse(SIM_ROUTE_URL).port or 8094
+    os.makedirs(os.path.join(REPO_ROOT, "log"), exist_ok=True)
+    log_path = os.path.join(REPO_ROOT, "log", "sim_editor.log")
+    log = open(log_path, "ab")
+    _sim_proc = subprocess.Popen([sys.executable, path, "--sim", "--port", str(port)], cwd=os.path.dirname(path),
+                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    for _ in range(24):                                    # up to ~12 s for the map + first sim tick
+        _t.sleep(0.5)
+        if _url_reachable(SIM_ROUTE_URL):
+            return {"reachable": True, "started": True, "pid": _sim_proc.pid, "log": log_path}
+        if _sim_proc.poll() is not None:
+            break
+    return {"reachable": False, "started": True, "pid": _sim_proc.pid, "log": log_path,
+            "error": f"simulator did not come up (see {log_path})"}
+
+
+def sim_stop() -> bool:
+    """Stop the simulator THIS manager started (never one started by hand)."""
+    global _sim_proc
+    if _sim_proc is None or _sim_proc.poll() is not None:
+        _sim_proc = None
+        return False
+    _sim_proc.terminate()
+    try:
+        _sim_proc.wait(5)
+    except Exception:  # noqa: BLE001
+        _sim_proc.kill()
+    _sim_proc = None
+    return True
+
+
+import atexit as _atexit
+
+_atexit.register(sim_stop)
+
+
+def _slash(url: str) -> str:
+    return url if url.endswith("/") else url + "/"
+
+
+def _map_route_url() -> str:
+    return _slash(SIM_ROUTE_URL if MAP_SOURCE == "sim" else ROUTE_URL)
+
+
+def _browser_url(url: str, request: Request) -> str:
+    """A loopback host in a configured URL means "this box" to the server, but the BROWSER loads these
+    pages into iframes, where 127.0.0.1 is the viewer's own machine. Replace it with the host the
+    browser used to reach us (works for the robot-side manager and for a Mac-side one alike)."""
+    from urllib.parse import urlparse, urlunparse
+
+    u = urlparse(url)
+    if u.hostname in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+        host = request.url.hostname or "localhost"
+        netloc = f"{host}:{u.port}" if u.port else host
+        return urlunparse(u._replace(netloc=netloc))
+    return url
+
+
+@app.get("/api/robot")
+def api_robot(request: Request):
+    """The robot-side browser page (teleop panel / eval serve it on the robot PC, port 8090) and
+    whether it answers right now. The RobotDisco Teleop tab embeds it and shows this status."""
+    import urllib.request
+    url = _slash(ROBOT_URL)
+    cfg = None
+    try:
+        with urllib.request.urlopen(url + "api/config", timeout=1.5) as r:
+            cfg = json.loads(r.read())
+    except Exception:  # noqa: BLE001 — nothing running on the robot, or it is off
+        cfg = None
+    return {"url": _browser_url(url, request), "reachable": cfg is not None, "config": cfg}
+
+
+@app.get("/api/route_editor")
+def api_route_editor(request: Request, scope: str = "routes"):
+    """The route editor the robot PC serves (rd_ws/Scripts/route_editor.py, supervisor unit
+    robot_disco_route_editor, port 8092): the nav2 map, the robot's live pose and the route files for
+    path.py. The Routes tab embeds it and shows whether it answers. `scope=map` (the Map and 3D tabs)
+    follows the Map tab's live / sim switch; the Routes tab always gets the robot's."""
+    import urllib.request
+    url = _map_route_url() if scope == "map" else _slash(ROUTE_URL)
+    info = None
+    try:
+        with urllib.request.urlopen(url + "api/map", timeout=1.5) as r:
+            info = {"map": json.loads(r.read()).get("name")}
+        with urllib.request.urlopen(url + "api/pose", timeout=1.5) as r:
+            info.update(json.loads(r.read()))
+    except Exception:  # noqa: BLE001 — the unit is not running, or the robot is off
+        info = None
+    return {"url": _browser_url(url, request), "reachable": info is not None, "info": info,
+            "source": (MAP_SOURCE if scope == "map" else "live")}
+
+
+# ---------------------------------------------------------------------------- Services tab
+# supervisor's XML-RPC on the robot PC (the same API its own :9999 page uses). Native page instead of an
+# iframe: fits the manager, works from the Mac, and adds the ordered base-stack restart.
+SUPERVISOR_URL = os.environ.get("VLA_SUPERVISOR_URL", "http://192.168.11.80:9999/RPC2")
+# the map page's node last: it, too, keeps dead publishers after a stack restart (no robot on the page)
+BASE_STACK = [("robot_disco", 25.0), ("robot_disco_localization", 8.0), ("robot_disco_navigation", 5.0),
+              ("robot_disco_collision_monitor", 3.0), ("robot_disco_route_editor", 0.0)]
+_svc_job = {"running": False, "log": [], "t": 0.0}
+
+
+def _supervisor():
+    import http.client
+    import xmlrpc.client
+
+    class _Transport(xmlrpc.client.Transport):          # the stock transport has no timeout
+        def make_connection(self, host):
+            return http.client.HTTPConnection(host, timeout=4)
+    return xmlrpc.client.ServerProxy(SUPERVISOR_URL, transport=_Transport(), allow_none=True)
+
+
+@app.get("/api/services")
+def api_services():
+    """Every supervisor unit with its state, like `supervisorctl status`, plus the ordered-restart job."""
+    try:
+        infos = _supervisor().supervisor.getAllProcessInfo()
+    except Exception as e:  # noqa: BLE001 — supervisor unreachable (robot off)
+        return {"reachable": False, "error": f"{type(e).__name__}: {e}", "url": SUPERVISOR_URL, "job": _svc_job}
+    now = time.time()
+    out = []
+    for i in infos:
+        running = i["statename"] == "RUNNING"
+        out.append({"name": i["name"], "group": i["group"], "state": i["statename"], "pid": i["pid"] or None,
+                    "uptime_s": int(now - i["start"]) if running and i["start"] else None,
+                    "description": i["description"], "stdout": i.get("stdout_logfile"), "stderr": i.get("stderr_logfile")})
+    return {"reachable": True, "url": SUPERVISOR_URL, "services": out, "job": _svc_job}
+
+
+@app.post("/api/services/restart_base")
+def api_services_restart_base():
+    """Restart the base stack IN ORDER with settle times: base launch (controller manager, lidars),
+    then localization, navigation, collision monitor. A unit restarted before the base settles ends up
+    bound to publishers that no longer exist (seen 2026-10-30: AMCL and the collision monitor with a
+    frozen odom buffer, robot stopped). Runs in the background; progress in /api/services' `job`."""
+    import threading
+    if _svc_job["running"]:
+        raise HTTPException(409, "already running")
+
+    def run():
+        _svc_job.update(running=True, log=[], t=time.time())
+        sv = _supervisor().supervisor
+        try:
+            for name, settle in BASE_STACK:
+                _svc_job["log"].append(f"restarting {name}")
+                try:
+                    sv.stopProcess(name, True)
+                except Exception:  # noqa: BLE001
+                    pass
+                sv.startProcess(name, True)
+                if settle:
+                    _svc_job["log"].append(f"settling {settle:.0f} s")
+                    time.sleep(settle)
+            _svc_job["log"].append("done — set the initial pose again if the robot was localized")
+        except Exception as e:  # noqa: BLE001
+            _svc_job["log"].append(f"failed: {e}")
+        finally:
+            _svc_job["running"] = False
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True}
+
+
+class ServiceAction(BaseModel):
+    action: str
+
+
+@app.post("/api/services/{name}")
+def api_service_action(name: str, body: ServiceAction):
+    """start | stop | restart one unit (restart = stop, wait, start — what supervisorctl does)."""
+    sv = _supervisor().supervisor
+    try:
+        if body.action == "start":
+            sv.startProcess(name, True)
+        elif body.action == "stop":
+            sv.stopProcess(name, True)
+        elif body.action == "restart":
+            try:
+                sv.stopProcess(name, True)
+            except Exception:  # noqa: BLE001 — already stopped
+                pass
+            sv.startProcess(name, True)
+        else:
+            raise HTTPException(400, "action must be start|stop|restart")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"supervisor: {e}")
+    return {"ok": True, "name": name, "action": body.action}
+
+
+@app.get("/api/services/{name}/log")
+def api_service_log(name: str, stream: str = "stdout", lines: int = 80):
+    """The tail of a unit's stdout / stderr log, the way the supervisor page shows it."""
+    sv = _supervisor().supervisor
+    try:
+        fn = sv.tailProcessStderrLog if stream == "stderr" else sv.tailProcessStdoutLog
+        data, offset, overflow = fn(name, 0, 60000)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"supervisor: {e}")
+    import re as _re
+    text = _re.sub(r"\x1b\[[0-9;]*m", "", data)          # the ROS colour codes
+    tail = text.splitlines()[-max(1, min(lines, 2000)):]
+    return {"name": name, "stream": stream, "lines": tail}
+
+
+@app.get("/api/map_source")
+def api_map_source_get(request: Request):
+    """The Map tab's switch: which route editor the Map and 3D tabs embed (live robot or simulation)."""
+    return {"mode": MAP_SOURCE, "urls": {"live": _browser_url(_slash(ROUTE_URL), request), "sim": _browser_url(_slash(SIM_ROUTE_URL), request)},
+            "sim": {"running": _sim_proc is not None and _sim_proc.poll() is None, "editor": _sim_editor_path()}}
+
+
+class MapSourceBody(BaseModel):
+    mode: str
+
+
+@app.post("/api/map_source")
+def api_map_source_set(body: MapSourceBody, request: Request):
+    global MAP_SOURCE
+    if body.mode not in ("live", "sim"):
+        raise HTTPException(400, "mode must be live or sim")
+    MAP_SOURCE = body.mode
+    out = api_map_source_get(request)
+    if body.mode == "sim":
+        out["start"] = sim_start()                     # starts the simulator here if nothing answers
+        out["sim"]["running"] = _sim_proc is not None and _sim_proc.poll() is None
+    else:
+        out["stopped"] = sim_stop()
+        out["sim"]["running"] = False
+    return out
 _mount_static()
 
 
 def main() -> None:
-    global DATASETS_DIR, REPO_ROOT, VIEWER
+    global DATASETS_DIR, REPO_ROOT, VIEWER, ROBOT_URL, ROUTE_URL, SIM_ROUTE_URL, MAP_SOURCE, SIM_EDITOR, SUPERVISOR_URL
     ap = argparse.ArgumentParser(description="VLA dataset-management web UI")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--datasets-dir", default="outputs/datasets")
     ap.add_argument("--repo-root", default=".")
     ap.add_argument("--web-port", type=int, default=9090, help="rerun web-viewer app port")
+    ap.add_argument("--robot-url", default=ROBOT_URL,
+                    help="where the robot PC serves its browser page (teleop panel / eval, --ui web)")
+    ap.add_argument("--route-url", default=ROUTE_URL,
+                    help="the route editor on the robot PC (VLA_ROUTE_URL), embedded in the Routes tab")
+    ap.add_argument("--sim-route-url", default=SIM_ROUTE_URL, help="route_editor.py --sim of the simulation stack (VLA_SIM_ROUTE_URL)")
+    ap.add_argument("--map-source", choices=["live", "sim"], default=MAP_SOURCE, help="what the Map tab embeds at start (its switch changes it)")
+    ap.add_argument("--supervisor-url", default=SUPERVISOR_URL, help="supervisor's XML-RPC on the robot PC (VLA_SUPERVISOR_URL), for the Services tab")
+    ap.add_argument("--sim-editor", default=SIM_EDITOR, help="rd_ws/Scripts/route_editor.py to launch with --sim when the switch goes to sim (VLA_SIM_EDITOR; default: next to this repo)")
     args = ap.parse_args()
+    ROBOT_URL = args.robot_url
+    ROUTE_URL = args.route_url
+    SIM_ROUTE_URL = args.sim_route_url
+    MAP_SOURCE = args.map_source
+    SIM_EDITOR = args.sim_editor
+    SUPERVISOR_URL = args.supervisor_url
 
     DATASETS_DIR = os.path.abspath(args.datasets_dir)
     REPO_ROOT = os.path.abspath(args.repo_root)

@@ -67,7 +67,21 @@ def summarize(root: str, name: str) -> dict[str, Any]:
         "media": "video" if is_video else "image",
         "size_mb": _size_mb(root),
         "has_backup": os.path.isdir(root + ".bak"),
+        # camera geometry + recording dates the teleop panel wrote (meta/capture.json); None for
+        # datasets recorded before it existed — those carry whatever cameras.py said at the time
+        "capture": _read_capture(root),
     }
+
+
+def _read_capture(root: str) -> "dict | None":
+    p = os.path.join(root, "meta", "capture.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        d = json.load(open(p))
+        return d if isinstance(d, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def list_datasets(datasets_dir: str) -> list[dict[str, Any]]:
@@ -121,5 +135,12 @@ def list_episodes(datasets_dir: str, name: str) -> list[dict[str, Any]]:
             "rating": a.get("rating"),
             "notes": a.get("notes", ""),
             "operator": a.get("operator", ""),
+            # Recorded by the teleop panel, read-only here: the grasp-attempt count (1 = clean) and
+            # the exposure locked at launch. Both change what the episode CONTAINS, so they belong
+            # next to the rating when deciding what to keep or rebalance. `grasps` stays None for
+            # episodes recorded before the flag existed — that is not the same as a clean 1.
+            "grasps": a.get("grasps"),
+            "regrasp_ranges": a.get("regrasp_ranges") or None,
+            "exposure": a.get("exposure") or None,
         })
     return rows

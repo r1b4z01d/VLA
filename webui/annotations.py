@@ -14,7 +14,25 @@ from typing import Any
 _FILE = ("meta", "annotations.json")
 
 # keys the UI may set on an episode; anything else is dropped on write
-FIELDS = ("rating", "notes", "operator")
+#
+# grasps: how many grasp ATTEMPTS the episode contains. Always written and always >= 1 — every
+#   episode has an initial grasp, and each re-grasp flagged from the deck adds one. Unconditional so
+#   that a MISSING key means "recorded before the flag existed", not "one clean grasp"; without that
+#   distinction you cannot tell an un-annotated dataset from a flawless one when rebalancing.
+# regrasp_ranges: frame RANGES, [[start, end], ...], one per re-grasp, marked from the deck during
+#   recording — the operator flags the stretch where the grasp missed and had to be retried. Ranges
+#   rather than a count alone because the point is to weight/condition on the recovery SEGMENT in
+#   training; "this episode contained a re-grasp somewhere in 250 frames" is too coarse to train on.
+#   Invariant: grasps == len(regrasp_ranges) + 1, so the count is the cheap key to sort/filter on and
+#   the ranges are only parsed by the sampler.
+#
+# NOTE indices are frames within the episode AS RECORDED. remap() carries them through episode
+# renumbering, but a sub-episode TRIM shifts frame indices inside an episode and would leave these
+# pointing at the wrong frames — ops.trim must adjust them (not handled yet).
+# exposure: {camera: value} locked at launch, in 100us units. Recorded because it is part of how the
+#   episode LOOKS — without it a dataset spanning two lighting setups is indistinguishable afterwards,
+#   and eval has no way to reproduce the appearance the policy was trained on.
+FIELDS = ("rating", "notes", "operator", "grasps", "regrasp_ranges", "exposure")
 
 
 def _path(dataset_root: str) -> str:

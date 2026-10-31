@@ -15,7 +15,12 @@ import time
 from typing import Any
 
 _META_KEYS = ("model", "checkpoint", "task", "episodes", "successes", "success_rate",
-              "rating", "notes", "operator")
+              "rating", "notes", "operator", "checkpoint_inferred")
+
+# Written by scripts/eval_hw.py on the robot PC and carried through read-only — the UI shows them but
+# never edits them, unlike _META_KEYS. `exposure` is here because a rollout can only be compared with
+# the dataset it was trained on if you know the lighting it actually ran at.
+_RUN_KEYS = ("steps", "duration_s", "exposure", "fps", "n_action_steps", "remote")
 
 
 def _dir(repo_root: str) -> str:
@@ -67,8 +72,13 @@ def list_evals(repo_root: str) -> list[dict[str, Any]]:
             "created": meta.get("created") or os.path.getmtime(run),
             "source": meta.get("source", "manual"),
             **{k: meta.get(k) for k in _META_KEYS},
+            **{k: meta.get(k) for k in _RUN_KEYS},
             "notes": meta.get("notes", ""),
             "operator": meta.get("operator", ""),
+            "server": meta.get("server"),
+            "served": meta.get("served"),
+            "checkpoint_inferred": bool(meta.get("checkpoint_inferred")),
+            "model_key": model_key(meta),
             **_artifacts(run),
         })
     out.sort(key=lambda e: -(e["created"] or 0))
@@ -102,6 +112,69 @@ def annotate_eval(repo_root: str, name: str, fields: dict) -> dict[str, Any]:
                 meta[k] = v
     _write(run, meta)
     return {"ok": True, "name": name, "annotation": {k: meta.get(k) for k in _META_KEYS}}
+
+
+UNASSIGNED = "unassigned"
+
+
+def model_key(meta: dict) -> str:
+    """The group an eval belongs to: `<run>/<step>` from a resolved checkpoint path such as
+    train/tigger_1_ft/checkpoints/020000/pretrained_model. A record whose `checkpoint` is only a
+    server address (127.0.0.1:8777 — every RD run before 2026-10-16) or the serve_ckpt symlink is
+    `unassigned` until someone sets it (per card, or the group's "assign" action)."""
+    ck = str(meta.get("checkpoint") or "")
+    if "/checkpoints/" in ck:
+        run, _, rest = ck.partition("/checkpoints/")
+        run = run.split("train/")[-1].strip("/")
+        step = rest.split("/")[0]
+        return f"{run}/{step}" if run else UNASSIGNED
+    m = meta.get("model")
+    # a manual eval created from the GUI names the model run directly
+    if m and m not in ("smolvla", "act") and ":" not in m and "serve_ckpt" not in m:
+        return str(m)
+    return UNASSIGNED
+
+
+def group_summary(repo_root: str) -> list[dict[str, Any]]:
+    """Per model_key: runs, rated runs, combined rating (mean of 1-5 stars), success rate when any
+    run records successes, span of dates. Sorted newest-activity first, `unassigned` last."""
+    groups: dict[str, dict[str, Any]] = {}
+    for e in list_evals(repo_root):
+        g = groups.setdefault(e["model_key"], {"model_key": e["model_key"], "runs": 0, "rated": 0,
+                                               "rating_sum": 0.0, "successes": 0, "episodes": 0,
+                                               "first": None, "last": None, "inferred": 0})
+        g["runs"] += 1
+        if e.get("rating"):
+            g["rated"] += 1
+            g["rating_sum"] += float(e["rating"])
+        if e.get("successes") is not None and e.get("episodes"):
+            g["successes"] += int(e["successes"])
+            g["episodes"] += int(e["episodes"])
+        if e.get("checkpoint_inferred"):
+            g["inferred"] += 1
+        c = e.get("created") or 0
+        g["first"] = c if g["first"] is None else min(g["first"], c)
+        g["last"] = c if g["last"] is None else max(g["last"], c)
+    out = []
+    for g in groups.values():
+        g["rating"] = round(g["rating_sum"] / g["rated"], 2) if g["rated"] else None
+        g["success_rate"] = round(g["successes"] / g["episodes"], 3) if g["episodes"] else None
+        del g["rating_sum"]
+        out.append(g)
+    out.sort(key=lambda g: (g["model_key"] == UNASSIGNED, -(g["last"] or 0)))
+    return out
+
+
+def bulk_annotate(repo_root: str, names: list[str], fields: dict) -> dict[str, Any]:
+    """annotate_eval over many runs; skips names that don't exist rather than failing the batch."""
+    done, missing = [], []
+    for n in names:
+        try:
+            annotate_eval(repo_root, n, fields)
+            done.append(n)
+        except ValueError:
+            missing.append(n)
+    return {"ok": True, "updated": done, "missing": missing}
 
 
 def rename_eval(repo_root: str, name: str, new_name: str) -> dict[str, Any]:
