@@ -3,7 +3,7 @@
 
 This is what the robot's route runner (rd_ws/Scripts/path.py, a `vla:` post_action) calls at a waypoint:
 
-    ~/VLA/run.sh scripts/vla_action.py --model pickup_tigger_smolvla_ft --task "pick up tigger" \
+    ~/rd_ws/VLA/run.sh scripts/vla_action.py --model pickup_tigger_smolvla_ft --task "pick up tigger" \
         --seconds 90 --still 3 --keep-grasp
 
 In order: (1) preflight — stop vla_teleop, vla_eval and the ROS UR driver if any of them runs (they own
@@ -52,6 +52,7 @@ def main() -> int:
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--web-port", type=int, default=8090)
+    ap.add_argument("--landmark", default="", help="the landmark this run is done at (recorded on the run's eval.json)")
     ap.add_argument("--extra", default="", help="extra eval_hw.py arguments, one string")
     ap.add_argument("--dry-run", action="store_true", help="print the plan and the eval command; touch nothing")
     a = ap.parse_args()
@@ -81,6 +82,8 @@ def main() -> int:
         cmd.append("--leave-powered")
     if a.done_when != "none":
         cmd += ["--done-when", a.done_when]
+    if a.landmark:
+        cmd += ["--landmark", a.landmark]
     cmd += shlex.split(a.extra)
 
     if a.dry_run:

@@ -5,7 +5,7 @@ open/close. Needs the `streamdeck` pip package + Pillow, and local-seat HID acce
 the SpaceMouse). Linux / robot PC. Key callbacks fire on the lib's own thread, so the panel drains
 them from a thread-safe queue inside its Tk loop (never touch Tk from the callback thread).
 
-Test:  ~/VLA/run.sh -m ur5e_lerobot.teleop.streamdeck   (prints key up/down events)
+Test:  ~/rd_ws/VLA/run.sh -m ur5e_lerobot.teleop.streamdeck   (prints key up/down events)
 """
 from __future__ import annotations
 

@@ -1,6 +1,8 @@
-"""Remote inference SERVER — load a policy (ACT|SmolVLA) on the GPU and serve actions to the robot PC's
-`eval_hw.py --remote` client. Run on the GPU box (SmolVLA is ~2.6 s/inference on the robot PC CPU but
-~tens of ms on the 4090). See ur5e_lerobot/remote.py for the SSH-relay topology across subnets.
+"""Remote inference SERVER — load a policy (ACT|SmolVLA) on a GPU and serve actions to the
+`eval_hw.py --remote` client. Since 2026-10-10 it runs ON THE ROBOT (the Jetson Orin) as the supervisor
+unit vla_infer_server (services/rd/vla_infer_server.conf, loopback :8777) and the eval client on the same
+box connects to 127.0.0.1:8777; the GPU box's own unit (services/vla_infer_server.conf) is a fallback for
+driving from the GPU box over the LAN. See ur5e_lerobot/remote.py for the topology.
 
     .venv/bin/python scripts/infer_server.py \
         --ckpt outputs/train/<run>/checkpoints/last/pretrained_model --device cuda --port 8777 \

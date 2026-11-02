@@ -1,18 +1,20 @@
 """UR5e arm over RTDE (ur_rtde) — the teleop/record control path.
 
 Project decision: RTDE for teleop + data collection (in-process, low latency, no rclpy); the
-ROS 2 path (Ros2ArmInterface) is reserved for autonomous/mobile-base deployment. The SpaceMouse
-EE-pose target is streamed to the UR controller via servoL, which runs IK on-board.
+ROS 2 path (Ros2ArmInterface) is reserved for autonomous/mobile-base deployment. The teleop / policy
+EE-pose target is clamped here and streamed to the UR controller as joint targets (servoJ, one
+controller-IK round trip per hand-over) by the streamer thread described below.
 
-ur_rtde is lazy-imported in connect() so this module loads anywhere; only the Intel robot PC that
-talks to the arm needs `pip install ur_rtde`.
+ur_rtde is lazy-imported in connect() so this module loads anywhere; only the robot PC (the Jetson
+Orin, where ur_rtde is built from source) that talks to the arm needs it.
 
 UR's TCP pose is [x, y, z, Rx, Ry, Rz] with rotation as an axis-angle (rotvec) — the SAME layout
 as this project's action/state EE pose, so poses pass through without conversion.
 
 STREAMING (2026-10-24): send_ee_pose() no longer talks to the robot itself. It hands the clamped
-target to _ServoStreamer, a thread that re-sends servoL at `stream_hz` with a short `servo_time`,
-interpolating from the last sent pose toward the newest target over the measured hand-over period.
+target to _ServoStreamer, a thread that re-sends servoJ at `stream_hz` (50 Hz) with a short
+`servo_time`, interpolating in joint space from the last sent pose toward the newest target over the
+measured hand-over period (one controller IK per hand-over, not per tick).
 Why: ur_rtde's control script runs servoj in its own thread and only picks a new target up at each
 servo_time boundary; with servo_time = 1/12 s and targets arriving every 110-125 ms (the teleop
 loop's real period) the pick-up was quantised to 83/166 ms and the arm converged onto each stale

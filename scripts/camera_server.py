@@ -1,7 +1,7 @@
 """The camera service: owns the three USB cameras and streams them over UDP multicast, with a TCP
 control port for exposure. Runs on the robot PC under supervisor as `vla_cameras`.
 
-    ~/VLA/run.sh scripts/camera_server.py [--fps 15] [--quality 90] [--no-side]
+    ~/rd_ws/VLA/run.sh scripts/camera_server.py [--fps 15] [--quality 90] [--no-side]
                                           [--unicast HOST:PORT ...] [--iface-ip 192.168.11.80]
 
 Consumers:

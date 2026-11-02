@@ -1,20 +1,22 @@
-"""Remote-inference bridge — run a heavy policy (e.g. SmolVLA) on a GPU host and stream actions to the
-robot PC over TCP. The robot PC (cameras + RTDE + hand) is the CLIENT; the GPU box is the SERVER.
+"""Remote-inference bridge — run a policy (e.g. SmolVLA) in a SERVER process and stream actions to the
+eval CLIENT over TCP. Since 2026-10-10 both live on the robot's Jetson Orin: scripts/infer_server.py runs
+there as the supervisor unit vla_infer_server and the client (eval_hw.py, cameras + RTDE + hand) connects
+over loopback (127.0.0.1:8777). The GPU box can still be the server, over the LAN, as a fallback.
 
-Why: SmolVLA is ~2.6 s/inference on the robot PC's CPU (measured) — unusable for real-time control —
-but ~tens of ms on the 4090. So inference lives on the GPU; only observations + actions cross the wire.
+Why a separate process even on one box: the server owns the GPU, the checkpoint(s) and the prefetch/RTC
+chunk scheduler, so a model switch or a server restart never touches the control loop, and the same
+client works unchanged against a remote GPU. Only observations + actions cross the socket.
 
 Wire format: 4-byte big-endian length prefix + a pickled dict of PLAIN Python types only (lists / str /
 bytes) so it is portable across differing numpy/torch versions. Images are JPEG-compressed. **Trusted
 LAN only** — pickle is not safe against a hostile peer.
 
-Topology (simplest): put the GPU box and the robot PC on the SAME subnet — the client then connects
-straight to the server, `eval_hw.py --remote <GPU_IP>:8777` (the server binds 0.0.0.0; just open the
-port in the GPU's firewall). Keep the GPU box dual-homed if it also needs internet for training.
-
-Fallback, if they must stay on different subnets bridged by the Mac: relay the port through the Mac —
-    ssh -N -L 0.0.0.0:8777:localhost:8777 gpu      # needs `GatewayPorts yes` in the Mac's sshd_config
-and point the client at <MAC_IP>:8777.
+Topology: on the robot, `eval_hw.py --remote 127.0.0.1:8777`. Against the GPU box instead (it is on the
+robot Wi-Fi, 192.168.11.119): `eval_hw.py --remote 192.168.11.119:8777` (the server binds 0.0.0.0; open
+the port in the GPU box's firewall). If the two ever sit on different subnets bridged by the workstation,
+relay the port through it —
+    ssh -N -L 0.0.0.0:8777:localhost:8777 GPU      # needs `GatewayPorts yes` in the workstation's sshd_config
+and point the client at <WORKSTATION_IP>:8777.
 """
 from __future__ import annotations
 

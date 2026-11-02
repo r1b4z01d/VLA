@@ -421,7 +421,7 @@ def restore_backup(datasets_dir: str, name: str) -> dict[str, Any]:
 def add_dataset(datasets_dir: str, *, source: str | None = None,
                 remote: str | None = None, as_name: str | None = None) -> dict[str, Any]:
     """Register a new dataset. Either copy a local dataset dir (`source`) or rsync one from the
-    robot PC (`remote` = dataset name under rd@.80:~/VLA/outputs/datasets)."""
+    robot PC (`remote` = dataset name under rd@.80:~/rd_ws/VLA/outputs/datasets)."""
     import subprocess
 
     if remote:
@@ -429,7 +429,7 @@ def add_dataset(datasets_dir: str, *, source: str | None = None,
         dest = os.path.join(datasets_dir, name)
         if os.path.exists(dest):
             raise ValueError(f"{name} already exists")
-        src = f"rd@192.168.11.80:~/VLA/outputs/datasets/{remote}/"
+        src = f"rd@192.168.11.80:~/rd_ws/VLA/outputs/datasets/{remote}/"
         r = subprocess.run(["rsync", "-a", "--info=stats1", src, dest + "/"],
                            capture_output=True, text=True, timeout=1800)
         if r.returncode != 0:

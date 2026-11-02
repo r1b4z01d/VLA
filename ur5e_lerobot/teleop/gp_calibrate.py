@@ -5,7 +5,7 @@ which gamepad input (and direction) you used and writes ``outputs/gp_calib.json`
 loads that file when the gamepad opens and overrides its built-in GP_MAP — so you never hand-tune
 signs, and stick axes can't end up swapped from your viewpoint. Bumpers LB/RB always drive grasp.
 
-    ~/VLA/run.sh -m ur5e_lerobot.teleop.gp_calibrate
+    ~/rd_ws/VLA/run.sh -m ur5e_lerobot.teleop.gp_calibrate
 """
 from __future__ import annotations
 

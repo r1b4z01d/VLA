@@ -23,24 +23,30 @@ useless for predicting the motion, so vision becomes mandatory.
 
 ## Before the session (setup)
 
-- [ ] **Cameras fixed and untouched.** Scene (0:7.3), wrist (0:5), side (0:8.4) — do NOT bump or
-      re-mount them during collection *or* before eval. Geometry consistency train↔deploy matters more
-      than anything optical.
-- [ ] **Lighting consistent** and adequate (gain is on auto now). Check all three feeds in the panel
-      look well-exposed and stable before starting.
-- [ ] **SpaceMouse** selected as input (NOT freedrive) and calibrated (roll/yaw already fixed).
-- [ ] **Set Home** to a good, safe transport start pose (arm tucked, workspace clear). This becomes the
-      consistent start + the auto-return-on-save target.
-- [ ] **Pick a real task string** and reuse it verbatim at eval — e.g. `--task "pick up the red cube"`.
-      (The old data still says `"put the block on the green pad"` — don't repeat that mistake.)
-- [ ] Launch on the robot PC into a **fresh dataset**:
+- [ ] **Cameras fixed and untouched.** Scene (USB port 1.1), wrist (2), side (4.2) on the Jetson — do
+      NOT bump or re-mount them during collection *or* before eval. Geometry consistency train↔deploy
+      matters more than anything optical. The square crop is recorded with the dataset; pick it before
+      the first episode (`/<cam>.raw.jpg` on `:5602`, or the panel's Crop card).
+- [ ] **Lighting consistent** and adequate. Check all three feeds in the panel look well-exposed and
+      stable before starting; exposure is metered at launch and locked (`scripts/tune_exposure.py`
+      picks it by number).
+- [ ] **SpaceMouse** selected as input (NOT freedrive) and calibrated.
+- [ ] **Set Home** to a good, safe transport start pose (arm tucked, workspace clear). The button is in
+      the Tk window (`--ui tk`); the file is `outputs/home_pose.json`. This becomes the consistent start
+      + the auto-return-on-save target.
+- [ ] **Pick a real task string** and reuse it verbatim at eval — e.g. `--task "pick up tigger"`.
+      (The oldest data still says `"put the block on the green pad"` — don't repeat that mistake.)
+- [ ] Launch into a **fresh dataset**. The normal way: write `~/rd_ws/VLA/config/teleop.env` on RD
+      (`ROOT=outputs/datasets/pickup_v2`, `TASK="pick up tigger"`, `SCENE_SQUARE` / `SIDE_SQUARE`,
+      `OPERATOR`) and start the `vla_teleop` unit from the manager's Services tab; or copy the line the
+      manager's **record cmd** button gives for an existing dataset. By hand:
       ```bash
-      ~/VLA/run.sh -m ur5e_lerobot.teleop.manual_panel --engine hardware --side-cam \
-        --use-videos --resume --root outputs/datasets/pickup_v2 \
-        --task "pick up the red cube" --operator "Bryan Ribas"
+      ~/rd_ws/VLA/run.sh -m ur5e_lerobot.teleop.manual_panel --engine hardware --cameras udp \
+        --resume --root outputs/datasets/pickup_v2 --repo_id local/pickup_v2 \
+        --task "pick up tigger" --scene-square 0.5 --side-square 0.5 --operator "Bryan Ribas"
       ```
-      (`--resume` appends into one dataset so all episodes stay mergeable; each Save auto-returns home,
-      auto-uploads to the GPU, and lights the deck for a 1–5★ rating.)
+      (`--resume` appends into one dataset so all episodes stay mergeable; video storage is the default;
+      each Save auto-returns home, auto-uploads to the GPU, and lights the deck for a 1–5★ rating.)
 
 ## The object variety (the core of the whole thing)
 
@@ -60,16 +66,18 @@ useless for predicting the motion, so vision becomes mandatory.
 2. **Arm at home** (it returns there automatically after the previous Save; deck **Reset** if needed).
 3. **● Start rec.**
 4. **Teleop the pick** with the SpaceMouse: approach → grasp → lift. Let the motion genuinely follow
-      where the object is (that's the vision signal you're teaching).
-5. **■ Save** — the arm auto-returns to home (recorded), the episode auto-uploads to the GPU.
+      where the object is (that's the vision signal you're teaching). A fumbled grasp you recover from
+      is worth marking (**⚑ +GRASP** / deck key 0): the trainer oversamples those ranges.
+5. **■ Save** — the episode ends at the grasp; the arm's return to home is **not recorded** (rig
+      housekeeping), the episode auto-uploads to the GPU.
 6. **Rate 1–5★** on the deck bottom row (skip/discard fumbles rather than saving bad demos).
 7. Repeat with a new object position.
 
 ## Keep these CONSTANT (so the policy learns the task, not noise)
 
-- Camera poses, lighting, the task string, and the home/start pose. A consistent home start is *good*
-  here: the approach *from* home must aim at the object, which is exactly the vision-dependent behavior
-  we want. Vary the **object**, not the rig.
+- Camera poses, crop, lighting, the task string, and the home/start pose. A consistent home start is
+  *good* here: the approach *from* home must aim at the object, which is exactly the vision-dependent
+  behavior we want. Vary the **object**, not the rig.
 
 ## How many
 
@@ -80,11 +88,10 @@ useless for predicting the motion, so vision becomes mandatory.
 
 ## After collection — GATE before touching the robot
 
-1. **Train** SmolVLA on the new dataset (Train button, or CLI). Start **standard** (state + absolute
-   actions) — if the variety is real, that alone should force vision use:
-   ```
-   --policy.type=smolvla --batch_size=64 --steps=20000 --save_freq=5000 ...
-   ```
+1. **Train** SmolVLA on the new dataset: the manager's **Train** button (SmolVLA fine-tune, the default)
+   or `scripts/train_regrasp.py --policy.path=lerobot/smolvla_base …` as in `smolvla.md`. Start
+   **standard** (state + absolute actions) — if the variety is real, that alone should force vision use.
+   Never `--policy.type=smolvla`: that is from scratch.
 2. **Run the offline gate** — do NOT drive the robot until this passes:
    ```bash
    .venv/bin/python scripts/debug_eval.py \
@@ -94,9 +101,10 @@ useless for predicting the motion, so vision becomes mandatory.
    **Pass criterion:** in check (3), *swap object image* should swing the action by **tens of mm**
    (comparable to the per-step motion / workspace scale) — not the ~1–4 mm we saw. Also check (2) blank
    should swing a lot. That's proof the policy is servoing to the object.
-3. **If it passes** → ship the checkpoint to the robot, repoint `outputs/serve_ckpt`, `sudo supervisorctl
-   restart vla_infer_server` there, and run `scripts/eval_hw.py --remote 127.0.0.1:8777 --cameras udp` on
-   the robot (e-stop in hand) — the server runs on the Jetson, not on the GPU box.
+3. **If it passes** → ship the checkpoint to the robot, repoint `outputs/serve_ckpt` (or
+   `ur5e_lerobot.services serve <run>`), `sudo supervisorctl restart vla_infer_server` there, and run
+   the eval on the robot (`vla_eval` with `config/eval.env`, or `scripts/eval_hw.py --remote
+   127.0.0.1:8777 --cameras udp`, e-stop in hand) — the server runs on the Jetson, not on the GPU box.
 4. **If it's still stuck low** → the variety wasn't wide enough; collect more (wider) before retraining.
    Only then reach for the stronger formulations we already built: **delta actions**
    (`scripts/make_delta_dataset.py`) and/or **no proprioception** (`scripts/train_nostate.py`) — these

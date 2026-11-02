@@ -35,3 +35,6 @@ ros2_ws/log/
 
 # per-robot arguments for the vla_teleop / vla_eval units (created by install_services.sh rd)
 config/*.env
+
+# runtime logs (the units and the panel write here)
+log/

@@ -4,7 +4,7 @@ Runs under the SYSTEM python (rclpy lives there, not in the VLA venv); the only 
 stream module, which needs nothing beyond numpy + cv2:
 
     source /opt/ros/humble/setup.bash
-    cd ~/VLA && PYTHONPATH=.:$PYTHONPATH python3 scripts/camera_ros_bridge.py [--raw] [--ns /vla/cameras]
+    cd ~/rd_ws/VLA && PYTHONPATH=.:$PYTHONPATH python3 scripts/camera_ros_bridge.py [--raw] [--ns /vla/cameras]
 
 (APPEND to PYTHONPATH — setup.bash puts the ROS site-packages there, and `PYTHONPATH=.` alone
 replaces it, which fails with "No module named rclpy".)
@@ -17,7 +17,8 @@ CompressedImage is the default because the wire payload IS a JPEG: the bytes are
 no decode, no re-encode, no cv_bridge — ~0 CPU per frame, and Foxglove / rqt / image_transport all
 render it natively. `--raw` decodes to rgb8 for nodes that need pixels, at ~3 ms/frame.
 
-QoS is SensorData (best-effort, depth 1): a late camera frame is worthless, so never queue them.
+QoS: `--qos reliable` (the default, depth 1) or `--qos best-effort` (SensorData). Depth stays 1 either
+way: a late camera frame is worthless, so never queue them.
 """
 from __future__ import annotations
 

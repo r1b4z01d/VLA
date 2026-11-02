@@ -5,7 +5,7 @@ Point the arm's TCP at each limit and press ENTER to capture. Produces:
   2. teleop target box  — home +/- POS_DELTAS (per-axis reach)     -> manual_panel.POS_DELTAS
   3. robot no-go rect   — the mobile-base body footprint (x,y)     -> workspace.NO_GO_XY
 
-    ~/VLA/run.sh scripts/calibrate_workspace.py --robot-ip 192.168.11.21
+    ~/rd_ws/VLA/run.sh scripts/calibrate_workspace.py --robot-ip 192.168.11.21
 
 Freedrive is UR-controlled, so the software clamps are OFF while you guide — keep the e-stop in hand.
 Freedrive is released on exit (including Ctrl-C). Each section is saved to --out as soon as it is done.

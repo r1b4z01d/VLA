@@ -2,8 +2,9 @@
 
 Each run is a folder with an eval.json (model/checkpoint, task, episodes, successes, success_rate,
 rating, notes, operator, source, created) plus optional artifacts (a video .mp4, a per-step .csv).
-Auto runs are written GPU-side by scripts/infer_server.py while it serves a bridge eval; manual runs
-are created from the GUI. The operator fills in rating/notes/success from the UI either way.
+Auto runs are written by scripts/eval_hw.py on the robot (one folder per rollout, rsynced to the GPU
+box's outputs/evals, the registry's home); manual runs are created from the GUI (+ New eval). The
+operator fills in rating/notes/success from the UI either way.
 """
 from __future__ import annotations
 

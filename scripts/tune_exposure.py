@@ -5,9 +5,9 @@ shelving and floor — and the square crop discards most of that. Measured on ca
 content pixels sit at >=250 with p99 = 255: the highlights are clipped and that detail is gone before
 the policy ever sees it. Locking manual exposure exposes for the workspace instead of the room.
 
-    ~/VLA/run.sh scripts/tune_exposure.py                      # all three cameras
-    ~/VLA/run.sh scripts/tune_exposure.py --cams scene side    # just these
-    ~/VLA/run.sh scripts/tune_exposure.py --values 20 39 78 156 --out /tmp/expo
+    ~/rd_ws/VLA/run.sh scripts/tune_exposure.py                      # all three cameras
+    ~/rd_ws/VLA/run.sh scripts/tune_exposure.py --cams scene side    # just these
+    ~/rd_ws/VLA/run.sh scripts/tune_exposure.py --values 20 39 78 156 --out /tmp/expo
 
 Reports per exposure value, measured on the frame AS RECORDED (rotation + square crop applied, black
 bars excluded so the letterbox can't skew the stats):

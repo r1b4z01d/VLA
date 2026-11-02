@@ -1,112 +1,59 @@
-# Camera placement plan
+# Cameras on the robot
 
-For VLA / imitation learning on the UR5e + AmazingHand. Camera views ARE part of the
-policy's observation space — placement, count, and stability directly bound how well a
-policy can learn and generalize. Treat this as a schema decision (see D6/D7).
+Three identical wide-FOV USB webcams make up the policy's observation; the RealSense D435 on the base is
+used by ROS (AprilTag relocalization, the landmark photos, the map pages' feed), never by the policy.
+The planning-era tiers (RealSense scene cam, top-down cam, hand-eye calibration) were dropped: a pure
+image → action policy needs a *stable* viewpoint, not extrinsics.
 
-## Principles
-1. **Scene (third-person) view** gives task context: full workspace, objects, robot.
-2. **Wrist (eye-in-hand) view** gives occlusion-robust close-ups of the grasp — the
-   single biggest accuracy win for manipulation policies. Essential for a dexterous
-   hand where fingers + contact matter.
-3. **A second third-person view** (side/oblique) disambiguates depth and covers
-   occlusions the front camera misses.
-4. **Fixed cameras must not move** within or between episodes of a dataset — the policy
-   keys off the exact viewpoint. Rigid mounts; mark/tape tripod positions to restore.
+## Placement
+| key | mount | rotation | stored frame |
+|---|---|---|---|
+| `scene` | 3rd-person, on the robot's right ("left eye"), sideways | 270° | 540×540 square crop of the portrait frame |
+| `side` | 2nd 3rd-person, on the robot's left ("right eye"), sideways | 90° | 540×540 square crop |
+| `wrist` | eye-in-hand on the UR5e flange, behind the AmazingHand, fingers at the top of the frame | 0° | 540×960 landscape, uncropped |
 
-## Recommended rig (tiered — scale to what you own)
+Fixed cameras must not move within or between episodes of a dataset: the policy keys off the exact
+viewpoint. The crop is part of that geometry (below).
 
-| Tier | Cameras | When |
-|---|---|---|
-| **Minimum** | C1 scene + C2 wrist | smallest viable VLA dataset |
-| **Recommended** | C1 scene + C2 wrist + C3 side | default; good depth/occlusion coverage |
-| **Ideal** | + C4 top-down | adds planar pick-place clarity |
+## Addressing: USB port, not device index
+Same model, no serial, so `sensors/cameras.py` opens them by **USB-port `by-path`**. On the Jetson Orin
+(final cabling, 2026-10-30): `scene` on port **1.1** (the dock on USB-C F), `wrist` on **2** (the other
+USB-C, alone), `side` on **4.2** (a USB-A jack). One USB 2 webcam per bus: all four USB-A jacks share
+one bus, so the three cameras need the three separate buses or they starve each other. Photos and the
+kernel map are in `rd_ws/provision/jetson/`. Re-plugging into another port changes the path; the
+constants `_PORTS` in `cameras.py` are the record.
 
-### C1 — Scene / front camera  → **Intel RealSense (RGB-D)**
-- Static, on a tripod/frame ~0.6–1.0 m from workspace center.
-- Elevated ~0.4–0.6 m above the table, pitched **30–45° down**, front or front-3/4.
-- Must frame the **entire reachable workspace + margin** and see the hand through the
-  whole trajectory. Use a RealSense here so depth aids scene 3D understanding.
-- If you have a D435/D455 → best as this scene cam (mid-range depth).
+## Capture and crop
+Capture is **1280×720 MJPG**. The scene and side cameras are mounted sideways, so after rotation they are
+720×1280 portrait and a **square crop** picks the 720×720 window: `SCENE_SQUARE` / `SIDE_SQUARE` =
+fraction along the long axis (0.40 keeps the shelf, 1.0 the floor). Frames are then fit into the
+960×540 capture box, which is how the stored 540×540 / 540×960 shapes come about. The crop is recorded
+with the dataset in `meta/capture.json` (squares, rotations, capture box, shapes, recording dates, host),
+carried into `outputs/train/<run>/capture.json` by training, reported by the inference server and
+applied by the eval before its first observation, so a checkpoint always runs on the framing it trained
+on. `scripts/camera_viewer.py --host 192.168.11.80 --squares` reads the live crop, `--square scene 0.65`
+moves it (not persisted); the teleop panel's Crop card does the same until the dataset exists.
 
-### C2 — Wrist / eye-in-hand camera  → **webcam, or RealSense D405 if you have one**
-- Mounted on the UR5e wrist-3 link / tool flange via a bracket, **offset above & behind
-  the AmazingHand**, looking forward-down along the approach axis so it sees the
-  **fingertips and grasp point** without the hand fully occluding the view (~10–20 cm).
-- D405 is purpose-built for close-range eye-in-hand → ideal here if available; otherwise
-  a wide-FOV webcam is fine (RGB-only is acceptable for the wrist).
-- Route the cable along the arm with strain relief; don't let the moving arm yank it.
+## The camera service (`scripts/camera_server.py`, unit `vla_cameras`)
+One process owns the three cameras (`--fps 15 --quality 90 --iface-ip 192.168.11.80`) and publishes
+JPEG frames over **multicast 239.42.11.1:5600** (1400-byte chunks, a `VCAM` header); a **control port
+:5601** (crop, exposure, restart) and an **MJPEG server :5602** (`http://192.168.11.80:5602/`:
+`/<cam>.mjpg`, `/<cam>.jpg`, `/<cam>.raw.jpg` = the full upright frame with the crop square drawn).
+The teleop panel, the eval, the ROS bridge and any browser subscribe at once (`--cameras udp`), nothing
+else opens the devices. Recording and eval run at **12 fps** (the panel's default). A camera that drops
+off USB is re-opened by the service; a client that sees no frames restarts the service once and retries.
+`scripts/camera_ros_bridge.py` (unit `vla_camera_ros_bridge`, system python with rclpy) republishes the
+same frames as `/vla/cameras/<scene|side|wrist>/image/compressed` for the map pages and Foxglove.
 
-### C3 — Side / second third-person camera  → **webcam**
-- ~90° offset from C1, similar elevation, oblique angle. Pure RGB is fine.
+## Exposure
+Auto-exposure meters the whole sensor frame, which the crop mostly discards, so highlights in the
+workspace clip. The panel and the eval **meter at launch and lock** (auto → lock; `--expose-manual`
+hands the Stream Deck's first row to + / − / SET for a trim); the locked values go into each episode's
+annotation (`expo` on the manager). `scripts/tune_exposure.py` sweeps exposure values and reports clip
+% / mean / p1 / p99 on the frame as recorded, verifies the camera honours the control, and writes a
+PNG per value; the winners go into `cameras.py` (`SCENE_AUTO_EXPOSURE, SCENE_EXPOSURE = 1.0, <value>`).
+Gain is auto (`*_GAIN = None`).
 
-### C4 — Top-down camera (optional)  → **webcam or 2nd RealSense**
-- Directly overhead looking straight down. Strong for tabletop pick-and-place (clean XY).
-- Note: two RealSense units can have **IR-emitter interference** — angle them apart or
-  disable one emitter.
-
-## Sim ↔ real parity (critical)
-- Define **C2 (wrist) as a fixed camera link/joint in the UR5e URDF/xacro** with the
-  measured extrinsic, so Gazebo/Isaac render the **identical** viewpoint to the real cam.
-- Place fixed cameras (C1/C3/C4) in the sim scene at their measured base-frame poses.
-- Keep resolution/FOV/aspect matched between sim and real to minimize the visual gap.
-
-## Calibration
-- **Wrist cam (eye-in-hand):** hand-eye calibration → camera→flange transform. Use
-  `easy_handeye2` (ROS 2) with a Charuco/ArUco board.
-- **Fixed cams (eye-to-hand):** board mounted on the gripper → camera→base transform.
-- Strictly required only if you log poses in a common frame, fuse depth, or want sim
-  parity / 3D — a pure image→action policy can train without extrinsics, but you'll
-  want them for sim-to-real.
-
-## Recording specs
-- Capture native (e.g. 640×480 or 1280×720); policies usually downsample to 224–256.
-- **Same FPS across all cameras** (e.g. 30 Hz), timestamp-aligned. LeRobot stores
-  per-camera streams in the dataset.
-- **USB bandwidth:** multiple RealSense + webcams can saturate a single USB3 controller
-  (esp. with depth). Put each RealSense on its own USB3 bus/host; prefer MJPEG for
-  webcams; use powered hubs. Watch for dropped-frame / "no frames" errors.
-
-## Lighting & consistency
-- Consistent, diffuse lighting; avoid backlighting the RealSense IR.
-- Keep backgrounds/lighting stable **within** a dataset. Domain randomization
-  (varied light/background/minor cam jitter) is a later step for generalization, not
-  for the first datasets.
-
-## Diagrams
-
-Plan (top-down):
-```
-                         front / operator
-   ┌──────────────────────────────────────────────────┐
-   │   (C3) side webcam                                 │
-   │        ◐ ─────┐                                    │
-   │                ▼                                   │
-   │            ┌────────────┐                          │
-   │            │  workspace │ ◀────── ◐ (C1) front     │
-   │            │  ▢ objects │         scene RealSense   │
-   │            │   ⬤ TCP+   │         (~0.8 m, 40° down)│
-   │            │     hand   │                          │
-   │            └────────────┘                          │
-   │                 ▣ UR5e base                        │
-   └──────────────────────────────────────────────────┘
-```
-
-Side (elevation):
-```
-   (C1) scene cam ◐ 40° down, ~0.5 m high
-        \
-         \            (C2) wrist cam ◐  (on wrist-3, looks down at fingers)
-          \              \
-           \             [UR5e arm]
-            \              \
-             \           (AmazingHand)
-   ═══════════╪══════════════⬤════════════════  table
-             base          workspace
-```
-
-## Open questions
-- Exact inventory: how many RealSense units (and which models — D405 vs D435/D455?) and
-  how many webcams? This sets the tier and the C1/C2 assignment.
-- Workspace footprint + where the UR5e is mounted (table edge vs pedestal) — drives C1
-  distance/height.
+## Lighting
+Consistent, diffuse; keep background and lighting stable within a dataset. Vary the object, not the rig
+(see `high_variety_recording.md`).

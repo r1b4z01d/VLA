@@ -17,16 +17,17 @@ TCP remains for firmware without the UDP listener (`transport="tcp"`).
 
 * a0..a7  per-servo angle offsets in DEGREES (8 servos = 4 fingers x 2).
 * servo order (FINGER_TO_SERVO): index=(0,1) middle=(2,3) ring=(4,5) thumb=(6,7).
-* speed   integer (firmware-defined units — confirm range; default is a placeholder).
-* default endpoint 192.168.1.194:8765, streamed ~20 Hz with TCP_NODELAY.
+* speed   integer, firmware units 50..2000 (the manager's Hand tab exposes the range).
+* default endpoint UDP 192.168.11.117:8766 (the hand's ESP32 on the robot Wi-Fi, powered from the UR
+  tool port); TCP :8765 on the same ESP32 is the legacy transport (`transport="tcp"`, TCP_NODELAY).
 
 Per-finger "curl" in [0,1] (0=open, 1=closed) maps to per-servo offsets via:
     offset = open + (close - open) * curl
 using the open/close tables below (verbatim from the demo's hand_processing.py).
 
 Design note: the hand stays behind this socket so it never has to share a Python
-interpreter with rclpy + lerobot (project decision D5). The arm goes through ROS 2;
-the LeRobot Robot adapter just writes 8 floats here.
+interpreter with rclpy + lerobot (project decision D5). The arm goes through RTDE
+(robot/rtde_arm.py); the LeRobot Robot adapter just writes 8 floats here.
 """
 from __future__ import annotations
 

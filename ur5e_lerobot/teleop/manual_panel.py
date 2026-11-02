@@ -1,15 +1,19 @@
-"""Tkinter manual control panel — collect sim demos WITHOUT a SpaceMouse.
+"""The teleop / recording panel — the app that collects demonstrations, in sim or on the hardware.
 
-Sliders set the UR5e EE-pose target (x,y,z,roll,pitch,yaw) and a hand grasp [0,1];
-a live MuJoCo render shows the arm + hand. Buttons record episodes into a LeRobotDataset.
-A task text field is captured per frame (used later by the language-conditioned VLA).
+Action source (`--input`): spacemouse (default) | gamepad (Xbox) | freedrive (hand-guide the real arm)
+| sliders (on-screen, no device). Engine (`--engine`): mujoco (default, a rendered UR5e + AmazingHand)
+| kinematic | hardware (the real UR5e over RTDE + the hand over UDP + the cameras). Episodes are
+recorded into a LeRobotDataset with a per-frame task string (what the language-conditioned VLA trains on).
 
-    .venv/bin/python -m ur5e_lerobot.teleop.manual_panel                 # GUI, MuJoCo arm+hand
-    .venv/bin/python -m ur5e_lerobot.teleop.manual_panel --engine kinematic
-    .venv/bin/python -m ur5e_lerobot.teleop.manual_panel --selftest      # headless check
+UI (`--ui`): web (default) serves a browser page on http://<this host>:8090 with the Tk window hidden;
+tk is the classic Tk window; both. The Tk window keeps a few controls of its own (Set Home, the
+randomize buttons), so use --ui tk|both for those. The Stream Deck, the 1-5 star rating after each save
+and the background upload to the GPU box all work the same whichever UI is shown.
 
-When the SpaceMouse arrives it replaces these sliders as the action source — same robot
-adapter, same schema, same dataset.
+    .venv/bin/python -m ur5e_lerobot.teleop.manual_panel --input sliders                 # sim, in the browser
+    .venv/bin/python -m ur5e_lerobot.teleop.manual_panel --input sliders --ui tk         # sim, Tk window
+    ~/rd_ws/VLA/run.sh -m ur5e_lerobot.teleop.manual_panel --engine hardware --cameras udp   # robot (or the vla_teleop unit)
+    .venv/bin/python -m ur5e_lerobot.teleop.manual_panel --selftest                      # headless check
 """
 from __future__ import annotations
 

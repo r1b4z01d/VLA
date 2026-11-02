@@ -5,7 +5,7 @@ which raw SpaceMouse axis (and sign) you used and writes the mapping to ``output
 The teleop panel loads that file on startup and overrides its built-in SM_MAP — so you never hand-
 tune signs again, and you can re-run this anytime your setup/viewpoint changes.
 
-    ~/VLA/run.sh -m ur5e_lerobot.teleop.sm_calibrate
+    ~/rd_ws/VLA/run.sh -m ur5e_lerobot.teleop.sm_calibrate
 """
 from __future__ import annotations
 

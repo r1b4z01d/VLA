@@ -1,8 +1,8 @@
 """Quick look at the camera service from any box on the LAN — no robot, no ROS.
 
-    ~/VLA/run.sh scripts/camera_viewer.py            # stats only (works headless / over ssh)
-    ~/VLA/run.sh scripts/camera_viewer.py --save     # also write one PNG per camera to /tmp
-    ~/VLA/run.sh scripts/camera_viewer.py --control 192.168.11.80 --status
+    ~/rd_ws/VLA/run.sh scripts/camera_viewer.py            # stats only (works headless / over ssh)
+    ~/rd_ws/VLA/run.sh scripts/camera_viewer.py --save     # also write one PNG per camera to /tmp
+    ~/rd_ws/VLA/run.sh scripts/camera_viewer.py --host 192.168.11.80 --status
 
 Prints per-camera fps / latency / drops once a second, which is the first thing to check when a
 consumer says "no frames": if this sees them, the service is fine and the problem is the consumer.

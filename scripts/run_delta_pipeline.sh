@@ -4,7 +4,7 @@
 # train SmolVLA on it (state INCLUDED, matching leesweqq/ur5_vla_pick_cube_project) -> debug_eval.
 # Launch detached:  setsid bash scripts/run_delta_pipeline.sh </dev/null >/dev/null 2>&1 &
 set -u
-cd ~/VLA || exit 1
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1   # the repo root, wherever it is checked out
 LOG=outputs/train/delta_pipeline.log
 exec >>"$LOG" 2>&1
 echo "===== delta pipeline started $(date) ====="

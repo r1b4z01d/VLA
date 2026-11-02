@@ -25,9 +25,11 @@ from PIL import Image
 
 import ur5e_lerobot.sim.combined_model as cm
 
-# robot_disco ROS description dir + xacro binary — override via env; sensible per-user defaults.
+# robot_disco ROS description dir + xacro binary — override via env. This repo is the rd_ws/VLA
+# submodule, so the description lives one level up in rd_ws/src.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DESC = os.environ.get("ROBOT_DISCO_DESC",
-                      os.path.expanduser("~/Documents/rd_ws/src/robot_disco/description"))
+                      os.path.normpath(os.path.join(_ROOT, "..", "src", "robot_disco", "description")))
 XACRO = os.environ.get("XACRO") or shutil.which("xacro") or "xacro"
 LIDAR_XY = (-0.52, 0.0)  # rp_s2e_lidar (back) origin on base_link
 

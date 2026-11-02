@@ -1,10 +1,12 @@
 """Deploy a trained policy (ACT or SmolVLA) on the REAL hardware — the policy drives the UR5e +
 AmazingHand from live camera + proprioceptive observations. The policy class is auto-detected from the
-checkpoint's config.json. **MOTION-PRODUCING; keep the e-stop in hand.** Runs on the robot PC (that's
-where the cameras + RTDE + hand live).
+checkpoint's config.json. **MOTION-PRODUCING; keep the e-stop in hand.** Runs on the robot PC (the
+Jetson Orin: cameras + RTDE + hand live there). Inference runs on the same box too: the vla_infer_server
+unit serves outputs/serve_ckpt on loopback and this client talks to it with --remote (SmolVLA in-process
+is the fallback, ~0.9 s a chunk on the Orin with no prefetch; the GPU box over the LAN is the other fallback).
 
-    ~/VLA/run.sh scripts/eval_hw.py --ckpt outputs/train/<run>/checkpoints/last/pretrained_model \
-        --fps 12 [--video]
+    ~/rd_ws/VLA/run.sh scripts/eval_hw.py --remote 127.0.0.1:8777 --cameras udp --fps 12 [--video]
+    ~/rd_ws/VLA/run.sh scripts/eval_hw.py --ckpt outputs/train/<run>/checkpoints/last/pretrained_model --fps 12   # in-process
 
 **Launch-time exposure first.** Before the control loop starts, the cameras auto-expose (median-
 targeted ladder search, ~1 s) and the result is LOCKED — auto has been reliable, so that is the
@@ -31,7 +33,7 @@ same process — cameras stay connected and the exposure stays locked, so back-t
 actually comparable (restarting would re-expose and move the one variable that must not move). Each
 run lights the bottom row for a 1-5 star rating; the stars, step count, duration, locked exposure and
 served checkpoint go into that run's `eval.json` in webui/evals.py's registry format, so runs show up
-in the manager's Evals tab beside the GPU-side captures. Any key other than 1-5 skips the rating.
+in the manager's Evals tab (each run is also rsynced to the GPU box, the registry's home). Any key other than 1-5 skips the rating.
 
 Typical loop: launch (paused) → FREEDRIVE, position the arm at a training-like start, FREEDRIVE off →
 PLAY → watch → PAUSE → NEW RUN → rate 1-5 → reposition → PLAY … → EXIT. There is NO automatic success metric on
@@ -360,6 +362,8 @@ def main() -> None:
                          "one's telemetry; pass a path to pin it.")
     ap.add_argument("--log-every", type=int, default=6, help="print a console diagnostic line every N steps")
     ap.add_argument("--operator", default="", help="name recorded on each run's eval.json")
+    ap.add_argument("--landmark", default="",
+                    help="the landmark (named place, manager Landmarks tab) this run is done at; recorded on eval.json")
     ap.add_argument("--gpu-host", default="bryan@GPU",
                     help="push each finished run to this host's eval registry ('' disables)")
     ap.add_argument("--gpu-evals-dir", default="~/VLA/outputs/evals",
@@ -550,6 +554,7 @@ def main() -> None:
                 "steps": self.played,
                 "duration_s": round(time.time() - self.started, 1),
                 "operator": args.operator,
+                "landmark": args.landmark,
                 "exposure": expo_values,
                 "fps": args.fps,
                 "n_action_steps": args.n_action_steps,

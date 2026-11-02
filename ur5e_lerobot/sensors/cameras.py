@@ -1,11 +1,14 @@
-"""Minimal USB/UVC camera capture for hardware teleop (scene + wrist).
+"""Minimal USB/UVC camera capture for hardware teleop: three identical wide-FOV webcams, scene / side /
+wrist (eye-in-hand). In normal operation the vla_cameras service (camera_stream.py) owns them and every
+consumer subscribes over UDP (`--cameras udp`); opening them here directly is the `--cameras local` path.
 
 `cv2.VideoCapture` by device index OR a stable device path; returns RGB HWC frames resized to the
 requested size. Works for USB webcams and RealSense-as-UVC. Matches the sim's render-fn contract —
 `read(w, h) -> RGB array` — so the teleop panel / recorder are unchanged between sim and hardware.
 
-Prefer the stable `/dev/v4l/by-id/...` paths below: numeric `/dev/videoN` indices are reassigned
-whenever USB devices are (un)plugged, but the by-id names are tied to the camera's USB descriptor.
+Cameras are addressed by stable `/dev/v4l/by-path/...` USB-PORT paths below: numeric `/dev/videoN`
+indices are reassigned whenever USB devices are (un)plugged, and by-id names collide because all three
+cameras are the same model with no serial — so each camera must stay in its port.
 
 Capture at 1280x720 via MJPG (default) and let `read()` downscale to the dataset size. 720p keeps
 3-camera capture real-time on the robot PC (1080p is ~2x the per-frame CPU) while still exceeding the

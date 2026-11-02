@@ -6,8 +6,8 @@ Two sources, both passive and safe to run next to the panel / eval / calibrator:
   * RTDE :30004 (ur_rtde receive) — polled for robot mode / safety mode / runtime state changes, with
     the TCP pose and force at the moment of each change.
 
-    ~/VLA/run.sh scripts/ur_event_log.py --ip 192.168.11.21 --out log/ur_events.log
-    tail -f ~/VLA/log/ur_events.log
+    ~/rd_ws/VLA/run.sh scripts/ur_event_log.py --ip 192.168.11.21 --out log/ur_events.log
+    tail -f ~/rd_ws/VLA/log/ur_events.log
 
 Why: "the UR faulted" from a script that only prints its own lines leaves no record of WHICH fault
 (joint limit, safety violation, script stopped ...). The pendant's log tab has it, but this writes it

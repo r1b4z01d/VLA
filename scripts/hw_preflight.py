@@ -7,8 +7,10 @@ and cameras are connected. Bring up one piece at a time — e-stop in hand.
     PYTHONPATH=. python scripts/hw_preflight.py --stage all        # arm-read + hand + cameras (no motion)
     PYTHONPATH=. python scripts/hw_preflight.py --stage move --move # TINY arm nudge (explicit opt-in)
 
-Defaults: UR 192.168.11.21, hand 192.168.11.117, scene cam 2, wrist cam 0.
-Needs `pip install ur_rtde` on the robot PC for the arm stages.
+Defaults: UR 192.168.11.21, hand 192.168.11.117 (UDP :8766), cameras from sensors/cameras.py (the
+scene / side / wrist USB-port by-path devices; --scene-cam / --wrist-cam override with an index or path).
+Stop the vla_cameras unit first for the cameras stage (it holds the devices). Needs ur_rtde in the venv
+for the arm stages (built from source on the Jetson by the provisioning kit).
 """
 from __future__ import annotations
 
@@ -88,8 +90,8 @@ def main() -> None:
     ap.add_argument("--stage", choices=["arm", "move", "hand", "cameras", "all"], default="all")
     ap.add_argument("--robot-ip", default="192.168.11.21")
     ap.add_argument("--hand-host", default="192.168.11.117")
-    ap.add_argument("--scene-cam", default=None, help="index or /dev path (default: stable by-id 4K cam)")
-    ap.add_argument("--wrist-cam", default=None, help="index or /dev path (default: stable by-id ARC cam)")
+    ap.add_argument("--scene-cam", default=None, help="index or /dev path (default: the scene USB-port by-path device)")
+    ap.add_argument("--wrist-cam", default=None, help="index or /dev path (default: the wrist USB-port by-path device)")
     ap.add_argument("--move", action="store_true", help="permit the small arm motion in the move stage")
     args = ap.parse_args()
 

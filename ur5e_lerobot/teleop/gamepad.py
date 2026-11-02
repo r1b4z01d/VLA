@@ -6,7 +6,7 @@ Panel mapping (see manual_panel):
   left stick  -> x, y        right stick -> roll, pitch
   triggers    -> z (RT up, LT down)      bumpers LB/RB -> grasp open/close
 
-Test:  ~/VLA/run.sh -m ur5e_lerobot.teleop.gamepad   (move sticks / triggers / bumpers)
+Test:  ~/rd_ws/VLA/run.sh -m ur5e_lerobot.teleop.gamepad   (move sticks / triggers / bumpers)
 """
 from __future__ import annotations
 

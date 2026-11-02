@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Grab → place → repeat on the arm, each stage waiting for the operator's go — ONE eval process.
 
-    ~/VLA/run.sh scripts/pick_place_loop.py                       # defaults below; --dry-run prints the command
-    ~/VLA/run.sh scripts/pick_place_loop.py --pick-model <run> --place-model <run> --cycles 3
+    ~/rd_ws/VLA/run.sh scripts/pick_place_loop.py                       # defaults below; --dry-run prints the command
+    ~/rd_ws/VLA/run.sh scripts/pick_place_loop.py --pick-model <run> --place-model <run> --cycles 3
 
 This is a thin wrapper over `scripts/eval_hw.py --stage … --stage … --cycles N`: the eval connects the
 cameras, meters the exposure and powers the UR once, then for each stage switches the server to the

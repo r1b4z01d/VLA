@@ -454,7 +454,7 @@ async function doAdd() {
   const v = await modal({ title: "Add / import a dataset", submit: "Add",
     fields: [
       { name: "remote", label: "import from robot PC (.80) — dataset name", type: "text", placeholder: "e.g. manual_4",
-        hint: "rsync from rd@192.168.11.80:~/VLA/outputs/datasets/<name>" },
+        hint: "rsync from rd@192.168.11.80:~/rd_ws/VLA/outputs/datasets/<name>" },
       { name: "source", label: "…or copy from a local path", type: "text", placeholder: "/abs/path/to/dataset" },
       { name: "as_name", label: "save as (optional)", type: "text", placeholder: "leave blank to keep the name" },
     ] });

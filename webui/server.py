@@ -425,12 +425,13 @@ ROUTE_URL = os.environ.get("VLA_ROUTE_URL", "http://192.168.11.80:8092/")   # rd
 # 3D tabs only — the Teleop and Routes tabs always talk to the robot.
 SIM_ROUTE_URL = os.environ.get("VLA_SIM_ROUTE_URL", "http://127.0.0.1:8094/")   # 8094: never the live editor's 8092
 MAP_SOURCE = os.environ.get("VLA_MAP_SOURCE", "live")      # "live" | "sim"
-SIM_EDITOR = os.environ.get("VLA_SIM_EDITOR", "")          # rd_ws/Scripts/route_editor.py; "" = look next to this repo
+SIM_EDITOR = os.environ.get("VLA_SIM_EDITOR", "")          # rd_ws/Scripts/route_editor.py; "" = look in the parent checkout
 _sim_proc = None                                           # the simulator this manager started (switch -> sim)
 
 
 def _sim_editor_path() -> "str | None":
-    cands = ([SIM_EDITOR] if SIM_EDITOR else []) + [os.path.join(REPO_ROOT, "..", "rd_ws", "Scripts", "route_editor.py"),
+    # this repo is the rd_ws/VLA submodule, so rd_ws/Scripts is one level up from REPO_ROOT
+    cands = ([SIM_EDITOR] if SIM_EDITOR else []) + [os.path.join(REPO_ROOT, "..", "Scripts", "route_editor.py"),
                                                      os.path.expanduser("~/rd_ws/Scripts/route_editor.py")]
     for c in cands:
         if c and os.path.isfile(c):

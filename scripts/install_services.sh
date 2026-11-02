@@ -66,5 +66,5 @@ sudo supervisorctl reread
 sudo supervisorctl update
 sudo supervisorctl status | grep -E 'vla_' || true
 if [ "$HOST_DIR" = "rd" ]; then
-  echo "manual-start apps: sudo supervisorctl start vla_teleop | vla_eval  (or the ▶ buttons on the manager's RobotDisco Teleop tab)"
+  echo "manual-start apps: sudo supervisorctl start vla_teleop | vla_eval  (or the manager's Services tab)"
 fi
