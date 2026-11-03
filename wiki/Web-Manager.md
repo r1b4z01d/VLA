@@ -148,7 +148,7 @@ pose, ↗ opens the page on its own. Teleop and Routes always talk to the robot.
 The robot's route editor itself (always live), with a URL box and ↗: the nav2 map, the live robot pose,
 click-to-edit waypoints with their `post_actions` (including `vla:` policy runs), Load / New / Save for
 `rd_ws/Scripts/path.py` routes, undo / redo, centre / densify. Details in the rd_ws README.
-<!-- TODO screenshot: manager-routes.png — http://192.168.11.119:8081/#routes (robot only, not yet captured) -->
+![Routes tab on the robot: the route editor embedded, with the camera panels](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-routes.png)
 
 ### Landmarks
 Named places the robot can navigate to, kept by the route editor on the robot
@@ -177,7 +177,7 @@ robot_face's Folks page from the robot (port 8096, `VLA_FOLKS_URL`), embedded: a
 person with their face picture, an editable name, first / last seen, how often recognised, last hello
 with a reset, snap, Forget, and a live "in view" badge. The status line shows the known count and who
 is in view. Needs `robot_face` running with its camera.
-<!-- TODO screenshot: manager-folks.png — http://192.168.11.119:8081/#folks (robot only, not yet captured) -->
+<!-- No screenshot on purpose: the tab shows people's faces and names. -->
 
 ### Services
 The robot's supervisor units (`/api/services`, via supervisor's XML-RPC at `--supervisor-url`): a
@@ -188,7 +188,7 @@ rest are switched on and off from a browser. **↻ Restart base stack (ordered)*
 `robot_disco` (settle 25 s) → `robot_disco_localization` (8 s) → `robot_disco_navigation` (5 s) →
 `robot_disco_collision_monitor` (3 s) → `robot_disco_route_editor`, the order that keeps every node
 bound to live publishers, with job progress in the tab. The robot must be stationary.
-<!-- TODO screenshot: manager-services.png — http://192.168.11.119:8081/#services (robot/GPU box only, not yet captured) -->
+![Services tab on the robot: every supervisor unit with start / stop / restart / log](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-services.png)
 
 ### RobotDisco Teleop
 The robot page served by the teleop panel or the eval (`ur5e_lerobot/ui/webpanel.py`, port 8090,

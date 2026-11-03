@@ -35,3 +35,8 @@ Full documentation lives in the **[project wiki](https://github.com/r1b4z01d/VLA
 
 See also **[ROADMAP.md](ROADMAP.md)** (what is built, in progress and next) and
 **[docs/decisions.md](docs/decisions.md)** (the architectural choices as taken).
+
+## License
+
+[CC BY-NC-SA 4.0](LICENSE) for everything in this repo, including the `ur5e_amazinghand_bringup` ROS
+package. LeRobot and the other dependencies keep their own licenses.

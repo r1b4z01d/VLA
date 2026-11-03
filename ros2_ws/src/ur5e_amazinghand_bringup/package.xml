@@ -9,7 +9,7 @@
     a MoveIt Servo config for SpaceMouse teleop. Target: ROS 2 Jazzy / Ubuntu 24.04.
   </description>
   <maintainer email="bryanribas@gmail.com">Bryan Ribas</maintainer>
-  <license>Apache-2.0</license>
+  <license>CC BY-NC-SA</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

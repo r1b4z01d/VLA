@@ -47,7 +47,14 @@ if _platform.machine() == "aarch64":
     #   SIDE  4.2  = a USB-A jack (shared bus with the lidar adapter, Stream Deck, receivers — fine)
     # Roles from frames: bookshelf straight-on = scene, AmazingHand fingers = wrist, arm-in-foreground
     # shelf = side. Photos + kernel map: rd_ws/provision/jetson/usb-ports-*.png, usb-layout.png.
-    _PORTS = {"scene": "1.1", "wrist": "2", "side": "4.2"}
+    # 2026-11-02 re-cabling (kept): the two USB-C cameras swapped places and the one on USB-C "L" now
+    # sits behind a 4-port hub (port 2.4) — one webcam per bus still holds, so that is fine:
+    #   WRIST 1.1  = the VIA dock on a USB-C port
+    #   SIDE  2.4  = hub on the other USB-C port, hub port 4
+    #   SCENE 4.2  = a USB-A jack
+    # (scene and side were first mapped the other way round; that put each camera under the other's
+    # rotation and both came out upside down — the 270/90 rotations below are right for these ports.)
+    _PORTS = {"scene": "4.2", "wrist": "1.1", "side": "2.4"}
 else:
     # Intel robot PC (retired 2026-10). Re-identified 2026-09-09 after a re-cabling moved all three
     # off their original ports (confirmed via lens-cover test + content inspection over the
