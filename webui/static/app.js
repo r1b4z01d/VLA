@@ -93,19 +93,12 @@ function modal({ title, fields, submit = "OK" }) {
 async function loadDatasets(fromMonitor = false) {
   let data;
   try { data = await api("/api/datasets"); } catch (e) { return err(e); }
-  $("#datasets-dir").textContent = data.datasets_dir || "";
+  state.datasetsDir = data.datasets_dir || "";          // the header no longer shows it
   const changed = state.signature && data.signature !== state.signature;
   state.signature = data.signature;
   state.datasets = data.datasets;
   renderDatasets();
-  const mon = $("#monitor");
-  if (fromMonitor && changed) {
-    mon.textContent = "change detected"; mon.classList.add("changed");
-    setTimeout(() => { mon.classList.remove("changed"); mon.textContent = "monitoring…"; }, 2500);
-    if (state.selected) loadEpisodes(state.selected);
-  } else if (!fromMonitor) {
-    mon.textContent = "monitoring…";
-  }
+  if (fromMonitor && changed && state.selected) loadEpisodes(state.selected);   // the folder monitor still refreshes silently
 }
 
 function captureStr(c) {
@@ -467,7 +460,6 @@ async function doAdd() {
 }
 
 // ---- wire up ----
-$("#btn-refresh").addEventListener("click", () => loadDatasets());
 $("#btn-add").addEventListener("click", doAdd);
 $("#btn-merge").addEventListener("click", doMerge);
 $("#btn-rename-task").addEventListener("click", doRenameTask);
@@ -508,8 +500,314 @@ $("#ep-collapse").addEventListener("click", () => {
 });
 applyCollapse();
 
+// (declared BEFORE the view switcher below: it calls loadHandView() synchronously at load when the URL hash
+//  is #hand, and these consts must already exist — `let`/`const` are not hoisted like the functions are)
+// ---- Hand view: the AmazingHand over UDP, through the manager (/api/hand*) ----
+// Sliders are by PHYSICAL finger. The four curl channels the API takes (the dataset / schema order, named
+// index, middle, ring, thumb) do not drive the fingers their names suggest on this hand — measured 2026-10-26
+// for the Stream Deck keys (ur5e_lerobot/teleop/manual_panel.py): channel 0 moves the middle finger, 1 the
+// pinky, 2 the index, 3 the thumb. The channel order itself stays: recorded datasets replay through it.
+const HAND_FINGERS = [["thumb", 3], ["index", 2], ["middle", 0], ["pinky", 1]];   // [label, curl channel]
+const HAND_CH = Object.fromEntries(HAND_FINGERS);                                // label -> channel
+const handPoseOf = (open) => { const c = [1, 1, 1, 1]; for (const [f, v] of Object.entries(open)) c[HAND_CH[f]] = v; return c; };
+const HAND_POSES = { open: [0, 0, 0, 0], half: [0.5, 0.5, 0.5, 0.5], close: [1, 1, 1, 1],
+                     point: handPoseOf({ index: 0 }), pinch: handPoseOf({ index: 0.75, thumb: 0.8 }), thumbs: handPoseOf({ thumb: 0 }) };
+const handS = { curls: [0, 0, 0, 0], abduct: [0, 0, 0, 0], timer: null, pending: null, lastSend: 0, gesturesBuilt: false };
+const handHost = () => $("#hand-host").value.trim();
+function handLog(line) {
+  const pre = $("#hand-log");
+  pre.textContent = [new Date().toLocaleTimeString() + "  " + line, ...pre.textContent.split("\n")].filter((x) => x).slice(0, 10).join("\n");
+}
+function handRow(name, idx) {
+  // idx: the finger's curl channel (see HAND_FINGERS); null: the "all" row, which drives every finger at once
+  const row = el("div", { class: "hand-r" + (idx === null ? " all" : "") });
+  const curl = el("input", { type: "range", min: 0, max: 100, value: 0, title: "curl: 0 open … 1 closed" });
+  const cval = el("span", { class: "val" }, "0.00");
+  const abd = idx === null ? el("span", { class: "muted", style: "font-size: 11px" }, "—") : el("input", { type: "range", min: -100, max: 100, value: 0, title: "abduction: -1 … 1" });
+  const aval = el("span", { class: "val" }, idx === null ? "" : "+0.00");
+  curl.addEventListener("input", () => {
+    const c = curl.value / 100;
+    if (idx === null) handS.curls = [c, c, c, c]; else handS.curls[idx] = c;
+    handSyncSliders(); handSendCurls();
+  });
+  curl.addEventListener("change", () => handSendCurls(true));
+  if (idx !== null) {
+    abd.addEventListener("input", () => { handS.abduct[idx] = abd.value / 100; handSyncSliders(); handSendCurls(); });
+    abd.addEventListener("change", () => handSendCurls(true));
+  }
+  row.append(el("span", { class: "fname" }, name), curl, cval, abd, aval);
+  row._set = (c, a) => {
+    curl.value = Math.round(c * 100); cval.textContent = c.toFixed(2);
+    if (idx !== null) { abd.value = Math.round(a * 100); aval.textContent = (a >= 0 ? "+" : "") + a.toFixed(2); }
+  };
+  return row;
+}
+function buildHandGrid() {
+  const g = $("#hand-grid");
+  if (g.childElementCount) return;
+  g.append(el("div", { class: "hand-r hdr" }, el("span"), el("span", {}, "curl"), el("span"), el("span", {}, "abduction"), el("span")));
+  handS.rows = [handRow("all", null), ...HAND_FINGERS.map(([f, ch]) => handRow(f, ch))];
+  handS.rows.forEach((r) => g.append(r));
+  handSyncSliders();
+}
+function handSyncSliders() {
+  if (!handS.rows) return;
+  const same = handS.curls.every((c) => Math.abs(c - handS.curls[0]) < 1e-6);
+  handS.rows[0]._set(same ? handS.curls[0] : handS.curls.reduce((a, b) => a + b, 0) / 4, 0);
+  HAND_FINGERS.forEach(([f, ch], i) => handS.rows[i + 1]._set(handS.curls[ch], handS.abduct[ch]));
+}
+async function handSendCurls(now = false) {
+  // while dragging, at most ~14 lines/s (the teleop stream's order of magnitude); the last value always goes out
+  const dt = performance.now() - handS.lastSend;
+  if (!now && dt < 70) { clearTimeout(handS.pending); handS.pending = setTimeout(() => handSendCurls(true), 70 - dt); return; }
+  clearTimeout(handS.pending); handS.lastSend = performance.now();
+  const body = { curls: handS.curls.slice(), abduct: handS.abduct.slice(), speed: +$("#hand-speed").value || 200, host: handHost() || undefined };
+  try { const r = await post("/api/hand/curls", body); handLog(r.line); } catch (e) { err(e); }
+}
+function handPose(name) { handS.curls = HAND_POSES[name].slice(); handS.abduct = [0, 0, 0, 0]; handSyncSliders(); handSendCurls(true); }
+async function handGesture(c, label) {
+  try { await post("/api/hand/gesture", { line: c, host: handHost() || undefined }); handLog(`${c}  (${label})`); } catch (e) { err(e); }
+}
+function handUptime(ms) { if (ms == null) return ""; const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`; }
+async function handStatus() {
+  const st = $("#hand-status");
+  let d; try { d = await api("/api/hand" + (handHost() ? "?host=" + encodeURIComponent(handHost()) : "")); } catch (e) { st.textContent = "○ " + e.message; st.className = "mono muted"; return; }
+  $("#hand-console").href = d.console_url;
+  $("#hand-host").placeholder = d.host;
+  const recent = !d.alive && d.last_alive_s != null && d.last_alive_s < 90;   // one lost probe on a lossy link is not a dead hand
+  st.textContent = d.alive ? `● ${d.host} · up ${handUptime(d.uptime_ms)} · ${d.state.sent} sent${d.state.errors ? ` · ${d.state.errors} failed` : ""}`
+    : recent ? `◐ ${d.host}: probe lost (answered ${Math.round(d.last_alive_s)} s ago)` : `○ ${d.host}: ${d.error}`;
+  st.className = d.alive ? "mono ok" : recent ? "mono warn" : "mono muted";
+  if (!handS.gesturesBuilt) {
+    handS.gesturesBuilt = true;
+    $("#hand-gestures").replaceChildren(...Object.entries(d.gestures).map(([c, label]) => el("button", { class: "btn", title: `sends "${c}"`, onclick: () => handGesture(c, label) }, `${c} · ${label}`)));
+    const sp = $("#hand-speed"); sp.min = d.speed_range[0]; sp.max = d.speed_range[1];
+  }
+  if (!handS.seeded && d.state.last) { handS.seeded = true; handS.curls = d.state.curls.slice(); handS.abduct = d.state.abduct.slice(); $("#hand-speed").value = d.state.speed; handSyncSliders(); }
+}
+async function loadHandView() {
+  if (!$("#hand-host").value) $("#hand-host").value = localStorage.getItem("handHost") || "";
+  buildHandGrid();
+  await handStatus();
+  clearInterval(handS.timer);
+  handS.timer = setInterval(() => { if (state.view === "hand") handStatus(); }, 5000);
+}
+$("#hand-host").addEventListener("change", () => { localStorage.setItem("handHost", handHost()); handStatus(); });
+$("#btn-hand-probe").onclick = handStatus;
+document.querySelectorAll("#view-hand [data-pose]").forEach((b) => b.addEventListener("click", () => handPose(b.dataset.pose)));
+$("#btn-hand-send").onclick = async () => {
+  const line = $("#hand-raw").value.trim(); if (!line) return;
+  try { const r = await post("/api/hand/raw", { line, host: handHost() || undefined }); handLog(line + (r.reply ? "  →  " + r.reply : "")); }
+  catch (e) { err(e); }
+};
+$("#hand-raw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-hand-send").click(); });
+
+// ---- Landmarks view: named places the robot can go to (the route editor on the robot keeps them; /api/landmarks* relays) ----
+// (above the view switcher for the same reason as the Hand block: loadLandmarksView() can run at load)
+const lmS = { last: null, sig: "", map: null, mapImg: null, mapSrc: null, models: null };
+let lmTimer = null;
+const lmDeg = (yaw) => `${(yaw * 180 / Math.PI).toFixed(0)}°`;
+const lmPoseText = (p) => `${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${lmDeg(p.yaw)}`;
+function lmMapThumb(lm) {
+  // a 4 m window of the nav map around the landmark, the landmark drawn at the centre with its heading
+  const c = el("canvas", { width: 160, height: 160, class: "lm-map", title: `map ${lm.map} around (${lm.x.toFixed(2)}, ${lm.y.toFixed(2)})` });
+  const draw = () => {
+    const m = lmS.map, im = lmS.mapImg, g = c.getContext("2d");
+    if (!m || !im || !im.complete || !im.naturalWidth) return;
+    const px = (lm.x - m.origin[0]) / m.resolution, py = m.height - (lm.y - m.origin[1]) / m.resolution;   // map pixel of the landmark
+    const half = 2.0 / m.resolution;                                                                  // 2 m each way
+    g.fillStyle = "#15171c"; g.fillRect(0, 0, 160, 160);
+    g.imageSmoothingEnabled = false;
+    g.drawImage(im, px - half, py - half, 2 * half, 2 * half, 0, 0, 160, 160);
+    g.strokeStyle = "#4da3ff"; g.lineWidth = 3; g.lineCap = "round";
+    g.beginPath(); g.moveTo(80, 80); g.lineTo(80 + Math.cos(lm.yaw) * 30, 80 - Math.sin(lm.yaw) * 30); g.stroke();
+    g.fillStyle = "#4da3ff"; g.beginPath(); g.arc(80, 80, 6, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.stroke();
+  };
+  if (lmS.mapImg && lmS.mapImg.complete) draw(); else if (lmS.mapImg) lmS.mapImg.addEventListener("load", draw);
+  return c;
+}
+function lmCard(lm, d) {
+  const here = lm.map === d.map;
+  const t = encodeURIComponent(lm.updated || "");
+  const photo = (file, label) => file
+    ? el("a", { href: `/api/landmarks/img/${file}?t=${t}`, target: "_blank", title: `${label} — open full size` },
+        el("img", { class: "lm-img", src: `/api/landmarks/img/${file}?t=${t}`, alt: label }))
+    : el("div", { class: "lm-img lm-none muted" }, `no ${label} photo`);
+  const cams = lm.cameras || [];
+  return el("div", { class: "card lm-card" + (here ? "" : " other-map") },
+    el("div", { class: "card-top" },
+      el("span", { class: "card-name" }, lm.name),
+      el("span", { class: "tag" + (here ? "" : " warn"), title: here ? "the map the robot runs now" : `the robot runs map ${d.map}` }, lm.map || "?"),
+      el("span", { class: "mono muted lm-pose", title: "x, y (m) and yaw in the map frame" }, lmPoseText(lm))),
+    el("div", { class: "lm-imgs" }, lmMapThumb(lm), photo(lm.images && lm.images.stitched, "side + scene"), photo(lm.images && lm.images.realsense, "RealSense")),
+    lmTasks(lm, d),
+    el("div", { class: "card-foot" },
+      el("button", { class: "btn primary", disabled: !here || !d.ros_up, title: here ? "send the robot there (nav2 goal)" : "not on the map the robot runs", onclick: () => lmGoto(lm) }, "Go"),
+      el("button", { class: "btn", onclick: () => lmRename(lm) }, "Rename…"),
+      el("button", { class: "btn", title: "take the photos again from where the robot is now", onclick: () => lmRecapture(lm, false) }, "↻ Photos"),
+      el("button", { class: "btn", title: "update this landmark to where the robot is now (pose and photos)", onclick: () => lmRecapture(lm, true) }, "⌖ Update"),
+      el("span", { class: "muted lm-when" }, `${lm.created || ""}${cams.length && cams.length < 3 ? " · photos: " + cams.join(", ") : ""}`),
+      el("button", { class: "btn danger", onclick: () => lmDelete(lm) }, "Delete")));
+}
+// ---- a landmark's tasks: "pick up tigger" = drive here, then run this model with this instruction (an eval).
+// The voice assistant on the robot reads the same file; ▶ Run hands it the job (it drives first, then runs).
+const LM_DONE = { none: "time / stillness", closed: "hand closed (a pick)", open: "hand opened (a place)" };
+function lmTaskSummary(t) {
+  const bits = [`${t.model}`, `“${t.task}”`, `${t.seconds || 120} s`];
+  if (t.still) bits.push(`still ${t.still} s`);
+  if (t.done_when && t.done_when !== "none") bits.push(`ends: ${LM_DONE[t.done_when] || t.done_when}`);
+  if (t.keep_grasp) bits.push("keep grasp");
+  if (t.home === false) bits.push("no home");
+  if (t.still_mode === "fingers") bits.push("fingers still");
+  if (t.extra) bits.push(t.extra);
+  return bits.join(" · ");
+}
+function lmTasks(lm, d) {
+  const here = lm.map === d.map, canRun = here && d.ros_up && (d.voice || d.source === "sim");
+  const runTitle = !here ? "not on the map the robot runs" : !d.ros_up ? "the editor's ROS node is down"
+    : !d.voice && d.source !== "sim" ? "the voice assistant (robot_voice) is not running — Services tab" : "drive there, then run the policy (the voice assistant does both)";
+  const rows = (lm.tasks || []).map((t) => el("div", { class: "lm-task" },
+    el("button", { class: "btn tiny primary", disabled: !canRun, title: runTitle, onclick: () => lmTaskRun(lm, t) }, "▶ Run"),
+    el("span", { class: "lm-task-name", title: "what you say: “Robot Disco, " + t.name + "”" }, t.name),
+    el("span", { class: "mono muted lm-task-sum", title: lmTaskSummary(t) }, lmTaskSummary(t)),
+    el("button", { class: "btn tiny", title: "edit", onclick: () => lmTaskEdit(lm, t) }, "✎"),
+    el("button", { class: "btn tiny danger", title: "remove this task", onclick: () => lmTaskDelete(lm, t) }, "×")));
+  return el("div", { class: "lm-tasks" },
+    el("div", { class: "lm-tasks-head" },
+      el("span", { class: "muted" }, rows.length ? `Tasks here (say “Robot Disco, <task>”)` : "No tasks here yet"),
+      el("button", { class: "btn tiny", title: "tie a policy run to this place", onclick: () => lmTaskEdit(lm, null) }, "+ Task")),
+    ...rows);
+}
+async function lmModels() {
+  if (lmS.models) return lmS.models;
+  try { lmS.models = ((await api("/api/models")).models || []).map((m) => m.name).sort(); } catch (e) { lmS.models = []; }
+  return lmS.models;
+}
+async function lmTaskEdit(lm, t) {
+  const models = await lmModels();
+  const cur = t || { seconds: 60, still: 3, done_when: "none", keep_grasp: false, home: true };
+  const modelField = models.length && (!cur.model || models.includes(cur.model))
+    ? { name: "model", label: "Model (training run to serve)", type: "select", value: cur.model || models[0], options: models.map((m) => ({ value: m, label: m })) }
+    : { name: "model", label: "Model (training run, run@step or checkpoint path)", value: cur.model || "", placeholder: "tigger_1_merged_smolvla_1" };
+  const r = await modal({
+    title: t ? `Edit task “${t.name}” at ${lm.name}` : `New task at ${lm.name}`,
+    fields: [
+      { name: "name", label: "What you say", value: cur.name || "", placeholder: "pick up tigger", hint: "“Robot Disco, pick up tigger” drives here and runs this." },
+      modelField,
+      { name: "task", label: "Instruction (the policy's task string)", value: cur.task || "", placeholder: "Grab and hold tigger" },
+      { name: "seconds", label: "Max seconds", type: "number", value: cur.seconds ?? 60 },
+      { name: "still", label: "Still seconds (0 = off)", type: "number", value: cur.still ?? 0, hint: "the run ends once nothing has moved for this long" },
+      { name: "done_when", label: "Ends when", type: "select", value: cur.done_when || "none",
+        options: [{ value: "none", label: "time or stillness only" }, { value: "closed", label: "the hand has closed and stays closed (a pick)" }, { value: "open", label: "the hand has opened after a grasp (a place)" }] },
+      { name: "keep_grasp", label: "Keep the grasp (carry the object; UR stays powered)", type: "checkbox", value: !!cur.keep_grasp },
+      { name: "home", label: "Return the arm home at the end", type: "checkbox", value: cur.home !== false },
+      { name: "extra", label: "Extra vla_action.py arguments", value: cur.extra || "", placeholder: "--fps 12" },
+    ],
+    submit: t ? "Save" : "Add task",
+  });
+  if (!r) return;
+  const body = { name: r.name.trim(), model: r.model.trim(), task: r.task.trim(), seconds: parseFloat(r.seconds) || 120,
+    still: parseFloat(r.still) || 0, done_when: r.done_when, keep_grasp: !!r.keep_grasp, home: !!r.home, extra: r.extra.trim() };
+  try {
+    await post(`/api/landmarks/${encodeURIComponent(lm.id)}/tasks${t ? "/" + encodeURIComponent(t.id) : ""}`, body);
+    ok(`${t ? "saved" : "added"}: ${body.name} at ${lm.name}`);
+  } catch (e) { err(e); }
+  lmRefresh();
+}
+async function lmTaskRun(lm, t) {
+  if (!confirm(`Run “${t.name}”?\n\nThe robot drives to “${lm.name}” (${lmPoseText(lm)}) by itself, then serves ${t.model} and runs “${t.task}” on the arm. Be ready to HALT (Map tab) or say “Robot Disco, stop”.`)) return;
+  try {
+    const r = await post(`/api/landmarks/${encodeURIComponent(lm.id)}/tasks/${encodeURIComponent(t.id)}/run`, {});
+    ok(r.sim ? `simulation: ${t.name} would run at ${lm.name}` : `sent to the voice assistant: ${t.name} at ${lm.name} — it drives there first`);
+  } catch (e) { err(e); }
+}
+async function lmTaskDelete(lm, t) {
+  if (!confirm(`Remove task “${t.name}” from ${lm.name}?`)) return;
+  try { await api(`/api/landmarks/${encodeURIComponent(lm.id)}/tasks/${encodeURIComponent(t.id)}`, { method: "DELETE" }); ok(`removed ${t.name}`); } catch (e) { err(e); }
+  lmRefresh();
+}
+function lmStatus(d) {
+  const s = $("#lm-status"), n = (d.landmarks || []).length, sim = d.source === "sim" ? "SIM · " : "";
+  const voice = d.source === "sim" ? "" : d.voice ? " · voice ✓" : " · voice assistant off";
+  if (d.pose) { s.textContent = `● ${sim}map ${d.map} · robot ${lmPoseText(d.pose)} · ${n} landmark${n === 1 ? "" : "s"}${voice}`; s.className = "mono ok"; }
+  else { s.textContent = `◐ ${sim}map ${d.map} · no robot pose (${d.ros || "—"}) · ${n} landmark${n === 1 ? "" : "s"}${voice}`; s.className = "mono warn"; }
+  const cams = d.cameras || {}, dead = Object.keys(cams).filter((k) => !cams[k]), b = $("#btn-lm-add");
+  b.disabled = !d.pose;
+  b.title = !d.pose ? "no robot pose: localization not running or not initialised"
+    : dead.length ? `no frame from ${dead.join(", ")} right now — the photos will lack them` : "save the robot's current map pose with photos from the cameras";
+}
+function lmRender(d) {
+  const sig = JSON.stringify([d.map, d.ros_up, d.voice, d.source, d.landmarks]);
+  if (sig === lmS.sig) return;
+  lmS.sig = sig;
+  const items = d.landmarks || [];
+  $("#lm-list").replaceChildren(...(items.length ? items.map((lm) => lmCard(lm, d))
+    : [el("div", { class: "placeholder" }, "No landmarks yet. Drive the robot somewhere, type a name and press “+ Add at robot”.")]));
+}
+async function lmLoadMap(source) {
+  if (lmS.mapSrc === source && lmS.map) return;
+  try { lmS.map = await api("/api/landmarks/map"); } catch (e) { lmS.map = null; return; }
+  lmS.mapSrc = source;
+  const im = new Image();
+  im.addEventListener("load", () => { lmS.sig = ""; if (lmS.last) lmRender(lmS.last); });
+  im.src = `/api/landmarks/map.png?src=${source}&t=${Date.now()}`;
+  lmS.mapImg = im;
+}
+async function lmRefresh() {
+  let d;
+  try { d = await api("/api/landmarks"); }
+  catch (e) { const s = $("#lm-status"); s.textContent = "○ " + e.message; s.className = "mono muted"; $("#btn-lm-add").disabled = true; return; }
+  lmS.last = d;
+  await lmLoadMap(d.source);
+  lmStatus(d); lmRender(d);
+}
+function loadLandmarksView() {
+  lmRefresh();
+  clearInterval(lmTimer);
+  lmTimer = setInterval(() => { if (state.view === "landmarks") lmRefresh(); }, 5000);
+}
+async function lmAdd() {
+  const name = $("#lm-name").value.trim();
+  if (!name) { $("#lm-name").focus(); return err("give the landmark a name"); }
+  const b = $("#btn-lm-add"); b.disabled = true; b.textContent = "capturing…";
+  try {
+    const r = await post("/api/landmarks", { name });
+    ok(`added ${r.landmark.name} at ${lmPoseText(r.landmark)}${r.missing && r.missing.length ? " — no frame from " + r.missing.join(", ") : ""}`);
+    $("#lm-name").value = "";
+  } catch (e) { err(e); }
+  b.textContent = "+ Add at robot"; b.disabled = false;
+  lmRefresh();
+}
+async function lmGoto(lm) {
+  if (!confirm(`Send the robot to “${lm.name}” (${lmPoseText(lm)})? It drives by itself — be ready to HALT (Map tab).`)) return;
+  try { await post(`/api/landmarks/${encodeURIComponent(lm.id)}/goto`, {}); ok(`goal sent: ${lm.name}`); } catch (e) { err(e); }
+}
+async function lmRename(lm) {
+  const r = await modal({ title: `Rename “${lm.name}”`, fields: [{ name: "name", label: "Name", value: lm.name }], submit: "Rename" });
+  if (!r || !r.name.trim() || r.name.trim() === lm.name) return;
+  try { await post(`/api/landmarks/${encodeURIComponent(lm.id)}`, { name: r.name.trim() }); ok("renamed"); } catch (e) { err(e); }
+  lmRefresh();
+}
+async function lmRecapture(lm, pose) {
+  if (pose && !confirm(`Update “${lm.name}” to where the robot stands now, and retake its photos?`)) return;
+  try {
+    const r = await post(`/api/landmarks/${encodeURIComponent(lm.id)}/recapture`, { pose, images: true });
+    ok(`${pose ? "updated" : "photos retaken"}: ${lm.name}${r.missing && r.missing.length ? " — no frame from " + r.missing.join(", ") : ""}`);
+  } catch (e) { err(e); }
+  lmRefresh();
+}
+async function lmDelete(lm) {
+  if (!confirm(`Delete landmark “${lm.name}”?`)) return;
+  try { await api(`/api/landmarks/${encodeURIComponent(lm.id)}`, { method: "DELETE" }); ok(`deleted ${lm.name}`); } catch (e) { err(e); }
+  lmRefresh();
+}
+$("#btn-lm-add").addEventListener("click", lmAdd);
+$("#btn-lm-refresh").addEventListener("click", () => { lmS.sig = ""; lmRefresh(); });
+$("#lm-name").addEventListener("keydown", (e) => { if (e.key === "Enter") lmAdd(); });
+
 // ---- view switching (Datasets / Models / Evals) ----
-const VIEWS = ["datasets", "models", "evals", "robot", "routes", "map", "services"];
+const VIEWS = ["datasets", "models", "evals", "robot", "hand", "routes", "landmarks", "map", "maps", "services", "folks"];
 function showView(v) {
   state.view = v;
   VIEWS.forEach((name) => { $("#view-" + name).hidden = name !== v; });
@@ -518,12 +816,15 @@ function showView(v) {
   if (v === "evals") loadEvals();
   if (v === "robot") loadRobot();
   if (v === "routes") loadRoutesView();
-  if (v === "map") loadMapView();
+  if (v === "map") { loadMapView(); if (typeof actlog !== "undefined" && actlog) actlogRefresh(); }
   if (v === "services") loadServicesView();
+  if (v === "folks") loadFolksView();
+  if (v === "hand") loadHandView();
+  if (v === "landmarks") loadLandmarksView();
+  if (v === "maps") loadMapsView();
   // the header's right side belongs to the robot page while that view is up; the dataset
   // monitor / refresh controls only make sense on the dataset views
-  const robot = v === "robot", embedded = robot || v === "routes" || v === "map";
-  ["#monitor", "#datasets-dir", "#btn-refresh"].forEach((s) => { const e = $(s); if (e) e.hidden = embedded; });
+  const robot = v === "robot";
   $("#hdr-robot").hidden = !robot;
   if (location.hash !== "#" + v) location.hash = "#" + v;
 }
@@ -671,6 +972,7 @@ function evalCard(ev) {
   meta.append(el("span", {}, "checkpoint: ", ck, ev.checkpoint_inferred ? el("span", { class: "tag warn", title: "assigned by hand" }, "inferred") : ""));
   if (ev.server) add("server", ev.server);
   add("task", ev.task);
+  if (ev.landmark) meta.append(el("span", { title: "the landmark (named place) the robot drove to for this run" }, "at: ", el("b", {}, "⌖ " + ev.landmark)));
   add("episodes", ev.episodes);
   if (ev.success_rate != null) add("success", Math.round(ev.success_rate * 100) + "%");
   else if (ev.successes != null && ev.episodes) add("success", `${ev.successes}/${ev.episodes}`);
@@ -823,6 +1125,39 @@ async function loadRoutesView() {
 }
 $("#route-url").addEventListener("change", () => { const fr = $("#route-frame"); fr.src = $("#route-url").value; fr.dataset.src = fr.src; $("#route-open").href = fr.src; });
 
+// ---- folks view: the people the robot knows (robot_face's Folks page on the robot PC, port 8096), embedded ----
+let folksTimer = null;
+function folksStatus(r) {
+  const s = $("#folks-status"), i = r.info || {};
+  if (r.reachable) {
+    const live = i.live && i.live.id ? ` · in view: ${i.live.name || i.live.id}` : "";
+    s.textContent = `● face node — ${i.count} known${live}`; s.className = "mono ok";
+  } else {
+    s.textContent = "○ face node not running"; s.className = "mono muted";
+  }
+  $("#folks-hint").hidden = r.reachable;
+  $("#folks-frame").hidden = !r.reachable;
+}
+async function loadFolksView() {
+  let r; try { r = await api("/api/folks"); } catch (e) { return err(e); }
+  const inp = $("#folks-url"); if (!inp.value) inp.value = r.url;
+  const url = inp.value || r.url, fr = $("#folks-frame");
+  $("#folks-open").href = url;
+  if (r.reachable && fr.dataset.src !== url) { fr.src = url; fr.dataset.src = url; }
+  folksStatus(r);
+  clearInterval(folksTimer);
+  folksTimer = setInterval(async () => {
+    if (state.view !== "folks") return;
+    try {
+      const rr = await api("/api/folks");
+      const was = $("#folks-frame").hidden;
+      folksStatus(rr);
+      if (rr.reachable && was) { fr.src = url; fr.dataset.src = url; }
+    } catch (e) { /* keep the last status */ }
+  }, 5000);
+}
+$("#folks-url").addEventListener("change", () => { const fr = $("#folks-frame"); fr.src = $("#folks-url").value; fr.dataset.src = fr.src; $("#folks-open").href = fr.src; });
+
 // ---- map view: the route editor's map mode (map + robot + lidar scans), embedded ----
 let mapTimer = null;
 async function loadMapView() {
@@ -842,6 +1177,70 @@ async function loadMapView() {
   mapTimer = setInterval(async () => { if (state.view !== "map") return; try { show(await api("/api/route_editor?scope=map")); } catch (e) { /* keep */ } }, 5000);
 }
 
+// ---- Live view: collapsible activity log (what the robot's units are doing / waiting for) ----
+// /api/activity merges the supervisor log tails of the nav, collision monitor, localization, route, voice, face,
+// eval and inference units, noise removed. Fetched only while the pane is open and the Live tab is up.
+var actlog = { open: false, timer: null, data: null, units: new Set(), allUnits: [], busy: false };
+try { actlog.open = localStorage.getItem("actlog.open") === "1"; } catch (e) { /* storage blocked */ }
+const alTime = (t) => { if (!t) return "        "; const d = new Date(t * 1000); return d.toTimeString().slice(0, 8); };
+function actlogRender() {
+  const body = $("#actlog-body"), d = actlog.data;
+  if (!d) return;
+  const sum = $("#actlog-summary");
+  if (!d.reachable) { sum.textContent = "○ supervisor not reachable (robot off?)"; sum.className = "mono muted"; body.replaceChildren(); return; }
+  const down = d.units.filter((u) => ["FATAL", "BACKOFF", "EXITED"].includes(u.state));
+  const run = d.units.filter((u) => u.state === "RUNNING").length;
+  sum.textContent = `● ${run} units running` + (down.length ? ` · down: ${down.map((u) => u.unit).join(", ")}` : "");
+  sum.className = "mono " + (down.length ? "warn" : "ok");
+  const chips = $("#actlog-units");
+  if (chips.dataset.sig !== d.units.map((u) => u.unit + u.state).join()) {
+    chips.dataset.sig = d.units.map((u) => u.unit + u.state).join();
+    chips.replaceChildren(...d.units.map((u) => el("span", {
+      class: "chip" + (actlog.units.has(u.unit) ? " on" : "") + (u.state === "RUNNING" ? "" : " down"),
+      title: `${u.name}: ${u.state.toLowerCase()}`,
+      onclick: () => { actlog.units.has(u.unit) ? actlog.units.delete(u.unit) : actlog.units.add(u.unit); chips.dataset.sig = ""; actlogRender(); },
+    }, u.unit)));
+  }
+  const rank = { INFO: 0, WARN: 1, ERROR: 2, FATAL: 2 }, min = rank[$("#actlog-level").value] || 0;
+  const waitOnly = $("#actlog-wait").checked;
+  const rows = d.lines.filter((r) => actlog.units.has(r.unit) && (rank[r.level] || 0) >= min && (!waitOnly || r.wait || r.level !== "INFO"));
+  const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 30;
+  body.replaceChildren(...rows.map((r) => el("div", { class: `al-row ${r.level}${r.wait ? " wait" : ""}` },
+    el("span", { class: "al-t" }, alTime(r.t)), el("span", { class: "al-u" }, r.unit),
+    el("span", { class: "al-m" }, (r.node && r.node !== r.unit ? `[${r.node}] ` : "") + r.msg),
+    r.count > 1 ? el("span", { class: "al-x" }, `×${r.count}`) : null)));
+  if ($("#actlog-follow").checked && (atEnd || body.dataset.fresh !== "1")) body.scrollTop = body.scrollHeight;
+  body.dataset.fresh = "1";
+}
+async function actlogRefresh() {
+  if (!actlog.open || state.view !== "map" || document.visibilityState !== "visible" || actlog.busy) return;
+  actlog.busy = true;
+  try {
+    actlog.data = await api("/api/activity?lines=400");
+    if (!actlog.allUnits.length && actlog.data.units) {      // first fetch: every unit on, except the chatty infra ones
+      actlog.allUnits = actlog.data.units.map((u) => u.unit);
+      actlog.units = new Set(actlog.allUnits.filter((u) => !["base", "tag"].includes(u)));
+    }
+    actlogRender();
+  } catch (e) { $("#actlog-summary").textContent = "○ " + e.message; $("#actlog-summary").className = "mono muted"; }
+  finally { actlog.busy = false; }
+}
+function actlogApply() {
+  $("#actlog").classList.toggle("collapsed", !actlog.open);
+  $("#actlog-toggle").textContent = actlog.open ? "▾" : "▸";
+  $("#actlog-body").hidden = !actlog.open;
+  $("#actlog-ctl").hidden = !actlog.open;
+  clearInterval(actlog.timer);
+  if (actlog.open) { actlog.timer = setInterval(actlogRefresh, 3000); actlogRefresh(); }
+}
+$("#actlog-toggle").addEventListener("click", () => {
+  actlog.open = !actlog.open;
+  try { localStorage.setItem("actlog.open", actlog.open ? "1" : "0"); } catch (e) { /* storage blocked */ }
+  actlogApply();
+});
+["#actlog-level", "#actlog-wait", "#actlog-follow"].forEach((s) => $(s).addEventListener("change", actlogRender));
+actlogApply();
+
 // the Map tab's live / sim switch: which route editor the Map tab embeds (its 3D button stays inside it)
 document.querySelectorAll('input[name="map-source"]').forEach((r) => r.addEventListener("change", async () => {
   if (!r.checked) return;
@@ -852,6 +1251,185 @@ document.querySelectorAll('input[name="map-source"]').forEach((r) => r.addEventL
   { const fr = $("#map-frame"); fr.removeAttribute("src"); delete fr.dataset.src; fr.hidden = true; }
   if (state.view === "map") loadMapView();
 }));
+
+// ---- Maps view: the robot's nav maps (rd_ws/src/robot_disco/maps, kept by the route editor) ----
+// list · activate (localization + navigation restart on it) · new map / re-map with slam_toolbox ·
+// a drawing editor over the map image · delete. Routes, landmarks and tasks are tagged with the map
+// they were made on; the editor serves the active map and tags new ones with it.
+var mapsTimer = null, mapsData = null;   // var: showView() may run for #maps before this block is reached (TDZ)
+const fmtMapSize = (m) => m.metres ? `${m.metres[0]} × ${m.metres[1]} m` : "?";
+const fmtMB = (b) => b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.round(b / 1e3) + " kB";
+// one badge per unit, all alike. Mapping needs localization (AMCL) and navigation OUT of the way, so for
+// those two RUNNING is the no-go (red) and STOPPED is green; for SLAM it is the other way round.
+function mapsUnitBadge(units, key, label, runningIsGood) {
+  const st = units[key] || "—", running = st === "RUNNING";
+  const cls = st === "—" ? "" : (running === runningIsGood ? " ok" : " warn");
+  return el("span", { class: "tag" + cls, title: key }, `${label}: ${st.toLowerCase()}`);
+}
+function mapCard(m, d) {
+  const busy = d.mapping || (d.job && d.job.running);
+  const act = m.active;
+  return el("div", { class: "card map-card" + (act ? " active" : "") + (m.error ? " warn" : "") },
+    el("div", { class: "card-top" },
+      el("span", { class: "card-name" }, m.name),
+      act ? el("span", { class: "tag ok", title: "the map the robot runs: new routes and landmarks are tagged with it" }, "active") : null,
+      m.posegraph ? el("span", { class: "tag", title: "made with SLAM: its posegraph is kept, so it can be continued (Edit via SLAM)" }, "SLAM") : null),
+    m.error ? el("div", { class: "muted" }, m.error)
+      : el("a", { href: `/api/maps/${m.name}.png?t=${Math.round(m.mtime || 0)}`, target: "_blank", title: "open the map image full size" },
+          el("img", { class: "map-thumb", src: `/api/maps/${m.name}.png?t=${Math.round(m.mtime || 0)}`, alt: m.name })),
+    el("div", { class: "card-meta" },
+      el("span", {}, el("b", {}, fmtMapSize(m)), ` · ${m.width || "?"} × ${m.height || "?"} cells @ ${m.resolution} m`),
+      el("span", {}, `origin ${m.origin ? m.origin.map((v) => v.toFixed(2)).join(", ") : "?"}`),
+      el("span", {}, `${m.image || ""} · ${fmtMB(m.bytes || 0)}`),
+      el("span", {}, m.mtime ? new Date(m.mtime * 1000).toLocaleString() : "")),
+    el("div", { class: "card-foot" },
+      el("button", { class: "btn primary", disabled: act || busy || !!m.error, title: act ? "already the robot's map" : "make this the robot's map (localization + navigation restart on it)", onclick: () => mapActivate(m) }, act ? "Active" : "Activate"),
+      el("button", { class: "btn", disabled: busy || !!m.error, title: "draw on the map: walls, free space, unknown", onclick: () => mapEdit(m) }, "✎ Edit"),
+      el("button", { class: "btn", disabled: busy || !m.posegraph, title: m.posegraph ? "continue mapping this map with slam_toolbox (drive around, then save)" : "no posegraph: only maps made with SLAM here can be continued", onclick: () => mapSlamStart("continue", m.name) }, "Edit via SLAM"),
+      el("span", { class: "muted lm-when" }, ""),
+      el("button", { class: "btn danger", disabled: act || busy, title: act ? "activate another map first" : "delete the map files", onclick: () => mapDelete(m) }, "Delete")));
+}
+function mapsRender(d) {
+  mapsData = d;
+  const units = d.units || {};
+  const st = $("#maps-status");
+  st.replaceChildren(el("span", {}, `● active: ${d.active || "?"} · ${(d.maps || []).length} maps`), " ",
+    ...(d.source === "sim" ? [el("span", { class: "tag warn" }, "sim")] : [mapsUnitBadge(units, "robot_disco_slam", "SLAM", true), " ", mapsUnitBadge(units, "robot_disco_localization", "localization", false), " ", mapsUnitBadge(units, "robot_disco_navigation", "navigation", false)]));
+  st.className = "mono ok";
+  $("#btn-maps-new").disabled = !!d.mapping || (d.job && d.job.running);
+  const slam = $("#maps-slam"), req = (d.slam && d.slam.request) || {};
+  if (d.mapping) {
+    slam.hidden = false;
+    const name = req.name || "";
+    slam.replaceChildren(
+      el("span", {}, el("b", {}, req.mode === "continue" ? `Re-mapping ${name}` : `Mapping a new map: ${name}`), " — drive the robot around (gamepad or VLA Teleop); the Live tab shows the map grow. Save when it looks right, then Stop and Activate it."),
+      el("span", { class: "muted" }, units.robot_disco_slam ? `slam unit: ${units.robot_disco_slam.toLowerCase()}` : ""),
+      d.slam && d.slam.last_save ? el("span", { class: "tag ok" }, `saved ${d.slam.last_save.name} at ${new Date(d.slam.last_save.t * 1000).toLocaleTimeString()}`) : null,
+      el("input", { id: "maps-savename", class: "robot-url", value: name, placeholder: "save as", maxlength: 40 }),
+      el("button", { class: "btn primary", onclick: mapSlamSave }, "Save"),
+      el("button", { class: "btn danger", onclick: mapSlamStop }, "Stop mapping"));
+  } else { slam.hidden = true; slam.replaceChildren(); }
+  const list = $("#maps-list");
+  list.replaceChildren(...(d.maps || []).map((m) => mapCard(m, d)));
+  if (d.job && (d.job.running || (d.job.log || []).length)) list.prepend(el("div", { class: "maps-job" + (d.job.running ? " on" : "") }, (d.job.running ? "switching map: " : "last switch: ") + (d.job.log || []).join(" · ")));
+}
+async function mapsRefresh() {
+  let d; try { d = await api("/api/maps"); } catch (e) { $("#maps-status").textContent = "○ " + e.message; $("#maps-status").className = "mono muted"; $("#maps-list").replaceChildren(); $("#btn-maps-new").disabled = true; return; }
+  mapsRender(d);
+}
+function loadMapsView() {
+  mapsRefresh();
+  clearInterval(mapsTimer);
+  mapsTimer = setInterval(() => { if (state.view === "maps" && !document.querySelector(".mapedit-back")) mapsRefresh(); }, 4000);
+}
+$("#btn-maps-refresh").onclick = mapsRefresh;
+$("#btn-maps-new").onclick = () => {
+  const name = $("#maps-newname").value.trim();
+  if (!name) return err("give the new map a name first");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) return err("map names: letters, digits, _ and - only");
+  if (mapsData && (mapsData.maps || []).some((m) => m.name === name)) return err(`a map named ${name} exists`);
+  mapSlamStart("new", name);
+};
+$("#maps-newname").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-maps-new").click(); });
+async function mapSlamStart(mode, name) {
+  const what = mode === "continue" ? `Re-map ${name} with SLAM?` : `Start a new map named ${name}?`;
+  if (!confirm(`${what}\n\nLocalization stops and slam_toolbox starts; the robot will not navigate until a map is activated again. Drive it around by hand, then Save and Stop.`)) return;
+  try { const d = await post("/api/maps/slam/start", { mode, name }); ok(`SLAM started (${mode}): ${(d.units || []).join(", ") || "editor only"}`); $("#maps-newname").value = ""; }
+  catch (e) { return err(e); }
+  mapsRefresh();
+}
+async function mapSlamSave() {
+  const name = ($("#maps-savename") || {}).value?.trim();
+  if (!name) return err("give the map a name");
+  toast("saving the map through slam_toolbox…");
+  try { const d = await post("/api/maps/slam/save", { name }); ok(`saved ${name}: map ${d.saved && d.saved.save_map === 0 ? "ok" : d.saved && d.saved.save_map}, posegraph ${d.saved && d.saved.serialize === 0 ? "ok" : d.saved && d.saved.serialize}`); }
+  catch (e) { return err(e); }
+  mapsRefresh();
+}
+async function mapSlamStop() {
+  if (!confirm("Stop mapping? Anything not saved is lost. The file map comes back; activate the saved map to run on it.")) return;
+  try { await post("/api/maps/slam/stop", {}); ok("SLAM stopped"); } catch (e) { return err(e); }
+  mapsRefresh();
+}
+async function mapActivate(m) {
+  if (!confirm(`Activate ${m.name}?\n\nLocalization and navigation restart on it (the robot stops what it is doing); set the initial pose afterwards. New routes and landmarks will be tagged with it.`)) return;
+  try { await post(`/api/maps/${m.name}/activate`, { restart: true }); ok(`${m.name} activated — restarting localization and navigation`); } catch (e) { return err(e); }
+  mapsRefresh();
+}
+async function mapDelete(m) {
+  if (!confirm(`Delete map ${m.name} and its files? Routes and landmarks made on it stay, tagged with its name.`)) return;
+  try { const d = await api(`/api/maps/${m.name}`, { method: "DELETE" }); ok(`deleted ${(d.deleted || []).join(", ")}`); } catch (e) { return err(e); }
+  mapsRefresh();
+}
+
+// ---- the drawing editor: paint on the map image (black = wall, white = free, grey = unknown) ----
+function mapEdit(m) {
+  const back = el("div", { class: "mapedit-back" });
+  const view = el("div", { class: "mapedit-view" });
+  const canvas = el("canvas"); view.append(canvas);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const tools = { wall: "#000000", free: "#ffffff", unknown: "#cdcdcd" };
+  let tool = "wall", shape = "brush", size = 3, scale = 1, tx = 0, ty = 0, drawing = null, undo = [], redo = [];
+  const stat = el("span", { class: "mono muted" }, "");
+  const sizeIn = el("input", { type: "range", min: 1, max: 40, value: size, title: "brush size (cells)" });
+  const saveAs = el("input", { type: "text", placeholder: "save as (new name)", maxlength: 40, title: "leave empty to overwrite " + m.name });
+  const toolBtn = (key, label, title) => el("button", { class: "btn" + (tool === key ? " on" : ""), "data-tool": key, title, onclick: (e) => { tool = key; bar.querySelectorAll("[data-tool]").forEach((b) => b.classList.toggle("on", b.dataset.tool === key)); view.classList.toggle("pan", key === "pan"); } }, label);
+  const shapeBtn = (key, label, title) => el("button", { class: "btn" + (shape === key ? " on" : ""), "data-shape": key, title, onclick: () => { shape = key; bar.querySelectorAll("[data-shape]").forEach((b) => b.classList.toggle("on", b.dataset.shape === key)); } }, label);
+  const bar = el("div", { class: "mapedit-bar" },
+    el("b", {}, `Edit map ${m.name}`), el("span", { class: "muted" }, `${m.width} × ${m.height} cells @ ${m.resolution} m`),
+    toolBtn("wall", "■ wall", "paint occupied (black)"), toolBtn("free", "□ free", "paint free space (white)"), toolBtn("unknown", "▒ unknown", "paint unknown (grey)"), toolBtn("pan", "✥ pan", "drag to pan (wheel zooms anywhere)"),
+    el("span", { class: "muted" }, "|"), shapeBtn("brush", "brush", "freehand"), shapeBtn("line", "line", "drag a straight line"), shapeBtn("rect", "rect", "drag a filled rectangle"),
+    el("label", {}, "size", sizeIn),
+    el("button", { class: "btn", title: "undo (Ctrl/⌘+Z)", onclick: () => doUndo() }, "↶ undo"), el("button", { class: "btn", title: "redo", onclick: () => doRedo() }, "↷ redo"),
+    el("button", { class: "btn", title: "fit the map in the window", onclick: () => fit() }, "fit"),
+    stat, el("span", { style: "flex:1" }),
+    saveAs, el("button", { class: "btn primary", onclick: () => save() }, "Save"), el("button", { class: "btn", onclick: () => close() }, "Close"));
+  back.append(bar, view); document.body.append(back);
+  sizeIn.oninput = () => { size = parseInt(sizeIn.value, 10) || 1; };
+  const img = new Image();
+  img.onload = () => { canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; ctx.drawImage(img, 0, 0); fit(); snapshot(); undo.length = 0; };
+  img.onerror = () => err("could not load the map image");
+  img.src = `/api/maps/${m.name}.png?t=${Date.now()}`;
+  const apply = () => { canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`; stat.textContent = `${Math.round(scale * 100)}%`; };
+  function fit() { const r = view.getBoundingClientRect(); scale = Math.min(r.width / canvas.width, r.height / canvas.height) * 0.96; tx = (r.width - canvas.width * scale) / 2; ty = (r.height - canvas.height * scale) / 2; apply(); }
+  function snapshot() { undo.push(ctx.getImageData(0, 0, canvas.width, canvas.height)); if (undo.length > 25) undo.shift(); redo.length = 0; }
+  function doUndo() { if (undo.length < 2) return; redo.push(undo.pop()); ctx.putImageData(undo[undo.length - 1], 0, 0); }
+  function doRedo() { if (!redo.length) return; const d = redo.pop(); undo.push(d); ctx.putImageData(d, 0, 0); }
+  const toCell = (e) => { const r = view.getBoundingClientRect(); return [(e.clientX - r.left - tx) / scale, (e.clientY - r.top - ty) / scale]; };
+  const dot = (x, y) => { ctx.fillStyle = tools[tool]; const h = size / 2; ctx.fillRect(Math.round(x - h), Math.round(y - h), size, size); };
+  const line = (x0, y0, x1, y1) => { const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0)) + 1; for (let i = 0; i <= n; i++) dot(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n); };
+  view.addEventListener("wheel", (e) => { e.preventDefault(); const r = view.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top; const f = e.deltaY < 0 ? 1.15 : 1 / 1.15; const ns = Math.min(40, Math.max(0.05, scale * f)); tx = mx - (mx - tx) * ns / scale; ty = my - (my - ty) * ns / scale; scale = ns; apply(); }, { passive: false });
+  view.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    view.setPointerCapture(e.pointerId);
+    if (tool === "pan" || e.button === 1 || e.shiftKey) { drawing = { pan: true, x: e.clientX, y: e.clientY, tx, ty }; return; }
+    const [x, y] = toCell(e); drawing = { x0: x, y0: y, x, y, base: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+    if (shape === "brush") dot(x, y);
+  });
+  view.addEventListener("pointermove", (e) => {
+    if (!drawing) return;
+    if (drawing.pan) { tx = drawing.tx + (e.clientX - drawing.x); ty = drawing.ty + (e.clientY - drawing.y); apply(); return; }
+    const [x, y] = toCell(e);
+    if (shape === "brush") { line(drawing.x, drawing.y, x, y); drawing.x = x; drawing.y = y; return; }
+    ctx.putImageData(drawing.base, 0, 0);
+    if (shape === "line") line(drawing.x0, drawing.y0, x, y);
+    else { ctx.fillStyle = tools[tool]; ctx.fillRect(Math.round(Math.min(drawing.x0, x)), Math.round(Math.min(drawing.y0, y)), Math.round(Math.abs(x - drawing.x0)) + 1, Math.round(Math.abs(y - drawing.y0)) + 1); }
+  });
+  const end = () => { if (drawing && !drawing.pan) snapshot(); drawing = null; };
+  view.addEventListener("pointerup", end); view.addEventListener("pointercancel", end);
+  const keys = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? doRedo() : doUndo(); } if (e.key === "Escape") close(); };
+  window.addEventListener("keydown", keys);
+  function close() { if (undo.length > 1 && !confirm("Close without saving?")) return; window.removeEventListener("keydown", keys); back.remove(); }
+  async function save() {
+    const name = saveAs.value.trim();
+    if (name && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) return err("map names: letters, digits, _ and - only");
+    if (!name && !confirm(`Overwrite ${m.name}'s image? (routes and landmarks keep their coordinates; nav uses it after the next activation / restart)`)) return;
+    toast("saving…");
+    try { const d = await post(`/api/maps/${m.name}/draw`, { png: canvas.toDataURL("image/png"), save_as: name || null }); ok(`saved ${d.map.name}`); undo.length = 1; }
+    catch (e) { return err(e); }
+    window.removeEventListener("keydown", keys); back.remove(); mapsRefresh();
+  }
+}
 
 // ---- Services view: supervisor's units on the robot PC, native (XML-RPC through the manager) ----
 let servicesTimer = null;
@@ -913,7 +1491,8 @@ async function loadServicesView() {
   servicesTimer = setInterval(() => { if (state.view === "services" && !Object.keys(svcOpenLogs).length) renderServices(); }, 4000);
 }
 $("#btn-services-refresh").onclick = renderServices;
-$("#btn-restart-base").onclick = async () => { if (!confirm("Restart robot_disco, then localization, navigation and the collision monitor, in order (about 45 s)? The robot must be stationary.")) return; try { await post("/api/services/restart_base", {}); } catch (e) { err(e); } renderServices(); };
+$("#btn-restart-base").onclick = async () => { if (!confirm("Restart robot_disco, then localization, navigation, the collision monitor and the route editor, in order (about 45 s)? The robot must be stationary.")) return; try { await post("/api/services/restart_base", {}); } catch (e) { err(e); } renderServices(); };
+
 
 // ---- "record cmd": the exact teleop launch line that appends to a dataset ----
 function recordCmd(d) {
@@ -932,5 +1511,48 @@ async function copyRecordCmd(d) {
 }
 
 loadDatasets();
+// ---- robot speaker volume (header, every tab): the face node on the robot serves /api/volume
+// next to its Folks page; the manager relays. Polled slowly, never while the slider is being dragged.
+const vol = { timer: null, dragging: false, last: null, muted: false, pending: null };
+function volShow(v) {
+  const r = $("#vol-range"), p = $("#vol-pct"), m = $("#vol-mute");
+  if (!v || v.volume == null) {
+    r.disabled = true; p.textContent = "—"; p.className = "mono muted"; m.textContent = "🔊"; m.classList.remove("off");
+    m.title = v && v.error ? v.error : "robot speaker: face node not reachable";
+    return;
+  }
+  r.disabled = false;
+  if (!vol.dragging) r.value = v.volume;
+  vol.muted = !!v.muted;
+  p.textContent = vol.muted ? "mute" : `${v.volume}%`;
+  p.className = vol.muted ? "mono warn" : "mono muted";
+  m.textContent = vol.muted ? "🔇" : v.volume === 0 ? "🔈" : v.volume < 50 ? "🔉" : "🔊";
+  m.classList.toggle("off", vol.muted);
+  m.title = `${vol.muted ? "unmute" : "mute"} the robot speaker (${v.sink || "default sink"})`;
+}
+async function volRefresh() {
+  if (vol.dragging || document.visibilityState !== "visible") return;
+  try { volShow(await api("/api/volume")); } catch (e) { volShow({ error: e.message }); }
+}
+function volSend(payload) {
+  // one request in flight at a time; the latest value wins (a drag fires dozens of input events)
+  vol.pending = payload;
+  if (vol.last) return;
+  vol.last = (async () => {
+    while (vol.pending) {
+      const p = vol.pending; vol.pending = null;
+      try { volShow(await post("/api/volume", p)); } catch (e) { err(e); }
+    }
+    vol.last = null;
+  })();
+}
+$("#vol-range").addEventListener("pointerdown", () => { vol.dragging = true; });
+$("#vol-range").addEventListener("pointerup", () => { vol.dragging = false; });
+$("#vol-range").addEventListener("input", (e) => { $("#vol-pct").textContent = `${e.target.value}%`; volSend({ volume: Number(e.target.value) }); });
+$("#vol-range").addEventListener("change", (e) => { vol.dragging = false; volSend({ volume: Number(e.target.value) }); });
+$("#vol-mute").addEventListener("click", () => volSend({ muted: !vol.muted }));
+volRefresh();
+vol.timer = setInterval(volRefresh, 10000);
+
 setInterval(() => loadDatasets(true), 4000);          // folder monitor (datasets view)
 setInterval(() => { if (state.view === "models") loadModels(); }, 5000);  // live training refresh

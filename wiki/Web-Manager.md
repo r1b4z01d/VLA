@@ -6,12 +6,13 @@ hand). One FastAPI app with a vanilla-JS page, title **Robot Disco V4**, ten tab
 
 | left group | right group |
 |---|---|
-| **Map** · **Routes** · **Landmarks** · **Folks** · **Services** — the robot (relayed from its own pages and its supervisor) | **RobotDisco Teleop** · **Hand** · **Datasets** · **Models** · **Evals** — the arm and the data |
+| **Live** · **Maps** · **Landmarks** · **Routes** · **Folks** · **Services** — the robot (relayed from its own pages and its supervisor) | **VLA Teleop** · **Hand** · **Datasets** · **Models** · **Evals** — the arm and the data |
 
 **Datasets** is the default view; every tab is deep-linkable as `#<view>` (`#map`, `#routes`,
 `#landmarks`, `#folks`, `#services`, `#robot`, `#hand`, `#datasets`, `#models`, `#evals`), and the
 header's right side shows what the current tab needs (the datasets folder monitor, or the robot page's
-status and URL). The dataset ops delegate to `lerobot.datasets.dataset_tools` and
+status and URL), plus the robot's **speaker volume** on every tab: a mute button and a slider, relayed
+through `/api/volume` to the face node's Folks server on the robot (`robot_face` audio_sink), polled every 10 s. The dataset ops delegate to `lerobot.datasets.dataset_tools` and
 `lerobot.scripts.lerobot_dataset_viz` (no bespoke dataset surgery except sub-episode trim, which has no
 library equivalent). Only lerobot + FastAPI are needed, so the same app runs on the **GPU box**, the
 **robot PC**, a **Mac**, or in **Docker**.
@@ -124,7 +125,7 @@ download, rename, delete. The unassigned group has **assign model to all…**. H
 
 ## The robot tabs
 
-### Map
+### Live
 The robot's own pages from the route editor (`rd_ws/Scripts/route_editor.py` on the robot PC, port
 8092), embedded. It opens the **3D view** (`/3d`) by default — a three.js scene: map, costmaps, the
 Velodyne cloud (coloured by height or intensity), the URDF robot with live joints, TF frames, nav2
@@ -143,6 +144,29 @@ The header's **live / sim** switch picks which editor the tab shows: the robot's
 pose, ↗ opens the page on its own. Teleop and Routes always talk to the robot.
 
 ![Map tab, 3D view (simulated robot)](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-map-3d.png)
+
+### Maps
+
+The robot's nav maps: every `<name>.yaml` + image in `rd_ws/src/robot_disco/maps` on the robot, listed with a
+thumbnail, size, resolution and whether it was made with SLAM (its posegraph is kept). One map is **active**:
+localization loads it (`maps/active_map`), the Live tab shows it, and new routes and landmarks are tagged
+with it — routes, landmarks and their tasks belong to the map they were made on, and the route editor and
+the Landmarks tab show which.
+
+- **Activate** — makes a map the robot's: the editor serves it and the localization + navigation units
+  restart on it (set the initial pose afterwards).
+- **+ New map (SLAM)** — type a name: localization stops and `robot_disco_slam` (slam_toolbox) starts on a
+  fresh map. Drive the robot around with the gamepad or VLA Teleop; the Live tab shows the map grow. **Save**
+  writes the image, the yaml and the posegraph through slam_toolbox's services; **Stop mapping** stops the
+  unit and brings the file map back; then Activate the new map.
+- **Edit via SLAM** — the same, continuing from a map's posegraph (only maps made with SLAM have one).
+- **✎ Edit** — a drawing editor over the map image: paint walls (black), free space (white) or unknown
+  (grey) with a brush, a line or a filled rectangle; wheel to zoom, pan tool or shift-drag to pan, undo /
+  redo; save over the map or as a new one.
+- **Delete** — removes the map's files (not the active map).
+
+The manager relays all of it to the route editor (`/api/maps` there) and drives the units through
+supervisor, so it works from any machine; with the Live tab's switch on sim only the editor is involved.
 
 ### Routes
 The robot's route editor itself (always live), with a URL box and ↗: the nav2 map, the live robot pose,
@@ -172,6 +196,12 @@ sim). Runs record the landmark on their `eval.json` (`--landmark`), shown on the
 
 ![Landmarks tab (simulated stack, no landmarks yet)](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-landmarks.png)
 
+The Live tab also has a collapsible **Activity** pane along its bottom edge (state remembered in the browser): the
+supervisor log tails of the nav, collision monitor, localization, route editor, voice, face, eval and inference units, merged by
+time (`/api/activity`), with the chatter filtered out and repeats folded into `×N`. Chips switch units, a level selector and
+**waiting / problems only** narrow it to the lines about stopping, failing, recovering; the summary names any unit that is down.
+It is only fetched (every 3 s) while the pane is open and the Live tab is showing.
+
 ### Folks
 robot_face's Folks page from the robot (port 8096, `VLA_FOLKS_URL`), embedded: a card per known
 person with their face picture, an editable name, first / last seen, how often recognised, last hello
@@ -190,7 +220,7 @@ rest are switched on and off from a browser. **↻ Restart base stack (ordered)*
 bound to live publishers, with job progress in the tab. The robot must be stationary.
 ![Services tab on the robot: every supervisor unit with start / stop / restart / log](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-services.png)
 
-### RobotDisco Teleop
+### VLA Teleop
 The robot page served by the teleop panel or the eval (`ur5e_lerobot/ui/webpanel.py`, port 8090,
 standard library only), embedded; while the tab is selected the header shows `● <mode> — <title>` and
 the page URL (`GET /api/robot`, URL from `--robot-url`). When nothing serves the page the tab says
@@ -206,7 +236,7 @@ page also works on its own in any browser, and it is the same page in both modes
   Model (checkpoint, model key, server flags, crop), Run (timer, step timing, stars), Runs this session,
   Arm. Details: [Deploy on Hardware](Deploy-on-Hardware).
 
-![RobotDisco Teleop tab on a laptop: the MuJoCo teleop panel from dev_stack.sh (simulated arm and cameras)](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-teleop-sim.png)
+![VLA Teleop tab on a laptop: the MuJoCo teleop panel from dev_stack.sh (simulated arm and cameras)](https://raw.githubusercontent.com/r1b4z01d/VLA/main/docs/img/manager-teleop-sim.png)
 <!-- TODO screenshot: robot-page-eval.png — http://192.168.11.80:8090/ with vla_eval running (robot only, not yet captured) -->
 
 ### Hand

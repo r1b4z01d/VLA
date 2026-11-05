@@ -10,23 +10,31 @@
 <body>
   <header>
     <nav class="views" id="view-nav">
-      <button class="nav-btn" data-view="map">Map</button>
+      <button class="nav-btn" data-view="map">Live</button>
+      <button class="nav-btn" data-view="maps">Maps</button>
+      <button class="nav-btn" data-view="landmarks">Landmarks</button>
       <button class="nav-btn" data-view="routes">Routes</button>
-      <button class="nav-btn" data-view="robot">RobotDisco Teleop</button>
-      <button class="nav-btn active" data-view="datasets">Datasets</button>
-      <button class="nav-btn" data-view="models">Models</button>
-      <button class="nav-btn" data-view="evals">Evals</button>
+      <button class="nav-btn" data-view="folks">Folks</button>
       <button class="nav-btn" data-view="services">Services</button>
     </nav>
     <div class="brand">Robot Disco <span>V4</span></div>
     <div class="hdr-right">
+      <nav class="views views-right">
+        <button class="nav-btn" data-view="robot">VLA Teleop</button>
+        <button class="nav-btn" data-view="hand">Hand</button>
+        <button class="nav-btn active" data-view="datasets">Datasets</button>
+        <button class="nav-btn" data-view="models">Models</button>
+        <button class="nav-btn" data-view="evals">Evals</button>
+      </nav>
+      <span id="hdr-vol" class="hdr-vol" title="robot speaker volume">
+        <button id="vol-mute" class="btn icon" title="mute / unmute the robot speaker">🔊</button>
+        <input id="vol-range" type="range" min="0" max="100" step="1" value="0" disabled>
+        <span id="vol-pct" class="mono muted">—</span>
+      </span>
       <span id="hdr-robot" class="hdr-robot" hidden>
         <span id="robot-status" class="mono muted">—</span>
         <input id="robot-url" class="robot-url mono" placeholder="http://192.168.11.80:8090/" title="robot page URL (Enter to apply)">
       </span>
-      <span id="monitor" class="monitor" title="folder monitor">monitoring…</span>
-      <span id="datasets-dir" class="muted mono"></span>
-      <button id="btn-refresh" class="btn">↻ Refresh</button>
     </div>
   </header>
 
@@ -134,7 +142,7 @@
           <h2>Services</h2>
           <div class="row-actions">
             <span id="services-status" class="mono muted">—</span>
-            <button id="btn-restart-base" class="btn" title="base launch, then localization, navigation, collision monitor, each given time to settle — the order that keeps every node bound to live publishers">↻ Restart base stack (ordered)</button>
+            <button id="btn-restart-base" class="btn" title="base launch, then localization, navigation, collision monitor and the route editor, each given time to settle — the order that keeps every node bound to live publishers">↻ Restart base stack (ordered)</button>
             <button id="btn-services-refresh" class="btn">↻ Refresh</button>
             <a id="services-open" class="muted" href="#" target="_blank" title="supervisor's own page">↗</a>
           </div>
@@ -156,6 +164,49 @@
       </section>
     </div><!-- /view-robot -->
 
+    <!-- ===== Hand view: the AmazingHand, driven from here over UDP (presets, per-finger sliders, the firmware's gestures, raw lines) ===== -->
+    <div id="view-hand" class="view" hidden>
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Hand</h2>
+          <div class="row-actions">
+            <span id="hand-status" class="mono muted">—</span>
+            <input id="hand-host" class="robot-url mono hand-host" placeholder="192.168.11.117" title="the hand's IP (Enter to apply; blank = the manager's default)">
+            <button id="btn-hand-probe" class="btn" title="send Q and expect K:<uptime>">probe</button>
+            <a id="hand-console" class="muted" href="#" target="_blank" title="the hand's own WebSerial console">↗</a>
+          </div>
+        </div>
+        <div class="hand-wrap">
+          <div class="hand-block">
+            <div class="hand-title">Presets <span class="muted">— sent as one J: line at the speed below (curl 0 = open, 1 = closed)</span></div>
+            <div class="hand-btns">
+              <button class="btn" data-pose="open">open</button>
+              <button class="btn" data-pose="half">half</button>
+              <button class="btn" data-pose="close">close</button>
+              <button class="btn" data-pose="point">point</button>
+              <button class="btn" data-pose="pinch">pinch</button>
+              <button class="btn" data-pose="thumbs">thumb up</button>
+            </div>
+          </div>
+          <div class="hand-block">
+            <div class="hand-title">Fingers <span class="muted">— by physical finger; drag to stream (the last line wins); abduction is the sideways spread, ±20°</span></div>
+            <div class="hand-grid" id="hand-grid"></div>
+            <div class="hand-row"><label for="hand-speed">speed</label><input id="hand-speed" type="number" min="50" max="2000" step="10" value="200" class="ep-input hand-num"> <span class="muted">firmware units, 50–2000; applies to the J: lines (presets and sliders)</span></div>
+          </div>
+          <div class="hand-block">
+            <div class="hand-title">Gestures <span class="muted">— the firmware's own moves, one character each, at the hand's built-in speed</span></div>
+            <div class="hand-btns" id="hand-gestures"><span class="muted">loading…</span></div>
+          </div>
+          <div class="hand-block">
+            <div class="hand-title">Raw line <span class="muted">— exactly what the firmware reads: <code>J:a0,…,a7,speed</code> (servo offsets in degrees), a gesture character, or <code>Q</code></span></div>
+            <div class="hand-row"><input id="hand-raw" class="ep-input mono" placeholder="J:-35,35,-35,35,-35,35,-35,35,200" spellcheck="false"><button id="btn-hand-send" class="btn">send</button></div>
+            <pre id="hand-log" class="hand-log"></pre>
+          </div>
+          <div class="muted hand-hint">Every command is one UDP datagram to port 8766, sent by the manager; on the hand's lossy WiFi a line can be lost, so repeat it if nothing moved. A running teleop panel or eval streams its own setpoints to the hand and overrides anything sent here.</div>
+        </div>
+      </section>
+    </div><!-- /view-hand -->
+
     <!-- ===== Routes view: the route editor served by the robot PC (map + live pose + waypoints), embedded ===== -->
     <div id="view-routes" class="view" hidden>
       <section class="panel grow robot-view">
@@ -173,7 +224,57 @@
       </section>
     </div><!-- /view-routes -->
 
+    <!-- ===== Folks view: the people the robot knows (face pictures, editable names), served by robot_face on the robot PC ===== -->
+    <div id="view-folks" class="view" hidden>
+      <section class="panel grow robot-view">
+        <div class="routes-bar">
+          <span id="folks-status" class="mono muted">—</span>
+          <input id="folks-url" class="robot-url mono" placeholder="http://192.168.11.80:8096/" title="Folks page URL (Enter to apply)">
+          <a id="folks-open" class="muted" href="#" target="_blank" title="open in its own tab">↗</a>
+        </div>
+        <iframe id="folks-frame" class="robot-frame" title="folks" allow="fullscreen"></iframe>
+        <div id="folks-hint" class="robot-hint muted" hidden>
+          The Folks page is not answering. It is served by the face node (supervisor unit <b>robot_face</b> on the robot PC,
+          <a href="http://192.168.11.80:9999/" target="_blank">http://192.168.11.80:9999/</a>) on port 8096. This tab connects by itself once it is up.
+        </div>
+      </section>
+    </div><!-- /view-folks -->
+
+    <!-- ===== Maps view: the robot's nav maps — list, activate, make new ones with SLAM, re-map, draw on them, delete ===== -->
+    <div id="view-maps" class="view" hidden>
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Maps</h2>
+          <div class="row-actions">
+            <span id="maps-status" class="mono muted">—</span>
+            <input id="maps-newname" class="robot-url" placeholder="new map name" maxlength="40" title="name for a new map">
+            <button id="btn-maps-new" class="btn primary" disabled title="start slam_toolbox on a fresh map; drive the robot around; then save">+ New map (SLAM)</button>
+            <button id="btn-maps-refresh" class="btn" title="reload">↻</button>
+          </div>
+        </div>
+        <div id="maps-slam" class="maps-slam" hidden></div>
+        <div id="maps-list" class="maps-list"></div>
+      </section>
+    </div><!-- /view-maps -->
+
     <!-- ===== Map view: the robot's map page (map + robot + lidar scans), the route editor in map mode ===== -->
+    <!-- ===== Landmarks view: named places the robot can go to, taken from where it stands (the route editor keeps them) ===== -->
+    <div id="view-landmarks" class="view" hidden>
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Landmarks</h2>
+          <div class="row-actions">
+            <span id="lm-status" class="mono muted">—</span>
+            <input id="lm-name" class="robot-url" placeholder="name, e.g. kitchen" maxlength="60" title="the landmark's name">
+            <button id="btn-lm-add" class="btn primary" disabled title="save the robot's current map pose with photos from the cameras">+ Add at robot</button>
+            <button id="btn-lm-refresh" class="btn" title="reload">↻</button>
+          </div>
+        </div>
+        <div id="lm-list" class="lm-list"></div>
+        <div class="muted hand-hint">A landmark is where the robot stands when you add it: its x / y / yaw in the map frame, the map's name, the side and scene cameras stitched into one photo, and the RealSense frame. <b>Go</b> sends the robot there as a nav2 goal — the Map tab shows the drive and has HALT. <b>Tasks</b> tie a policy run (an eval) to the place: what you say, the model to serve, its instruction and how the run ends; “Robot Disco, pick up tigger” then drives to that landmark and runs it, and <b>▶ Run</b> does the same from here. The entries live with the route editor on the robot (<code>rd_ws/Scripts/landmarks/</code>); the voice assistant reads the same file.</div>
+      </section>
+    </div><!-- /view-landmarks -->
+
     <div id="view-map" class="view" hidden>
       <section class="panel grow robot-view">
         <div class="routes-bar">
@@ -185,6 +286,24 @@
           <a id="map-open" class="muted" href="#" target="_blank" title="open in its own tab">↗</a>
         </div>
         <iframe id="map-frame" class="robot-frame" title="map" allow="fullscreen"></iframe>
+        <div id="actlog" class="actlog collapsed">
+          <div class="actlog-bar">
+            <button id="actlog-toggle" class="btn icon" title="show / hide the activity log">▸</button>
+            <b>Activity</b>
+            <span id="actlog-summary" class="mono muted">—</span>
+            <span class="actlog-ctl" id="actlog-ctl" hidden>
+              <span id="actlog-units" class="actlog-units"></span>
+              <select id="actlog-level" title="lowest level shown">
+                <option value="INFO">info +</option>
+                <option value="WARN">warnings +</option>
+                <option value="ERROR">errors</option>
+              </select>
+              <label title="only lines about waiting, stopping, failing, recovering"><input type="checkbox" id="actlog-wait"> waiting / problems only</label>
+              <label><input type="checkbox" id="actlog-follow" checked> follow</label>
+            </span>
+          </div>
+          <div id="actlog-body" class="actlog-body" hidden></div>
+        </div>
         <div id="map-hint" class="robot-hint muted" hidden>
           The map page is the route editor in map mode: supervisor unit <b>robot_disco_route_editor</b> on the robot PC
           (<a href="http://192.168.11.80:9999/" target="_blank">http://192.168.11.80:9999/</a>). This tab connects by itself once it is up.
