@@ -12,8 +12,8 @@ landmark ("Robot Disco, pick up tigger"). `scripts/pick_place_loop.py` chains gr
 This repo is the **`rd_ws/VLA` git submodule** (since 2026-11-02). On the robot it lives at
 `~/rd_ws/VLA`; the GPU box keeps a plain copy at `~/VLA`.
 
-The web manager (`webui/`, port 8081) is both the data console and the robot console, ten tabs:
-Map (3D / 2D, live or simulated) · Routes · Landmarks (+ tasks) · Folks · Services · RobotDisco Teleop ·
+The web manager (`webui/`, port 8081) is both the data console and the robot console, eleven tabs:
+Live (3D / 2D, live or simulated) · Maps (SLAM, drawing editor, activate) · Landmarks (+ tasks) · Routes · Folks · Services · VLA Teleop ·
 Hand · Datasets · Models · Evals.
 
 ![Datasets tab: dataset explorer, episode manager and the rerun player (simulated stack, local data)](docs/img/manager-datasets.png)
@@ -28,7 +28,7 @@ Full documentation lives in the **[project wiki](https://github.com/r1b4z01d/VLA
 - [Hardware Teleop & Recording](https://github.com/r1b4z01d/VLA/wiki/Hardware-Teleop-and-Recording) — the recording app and its browser page, the camera service and crop, Stream Deck, save / home / rating / upload.
 - [Recording Sim Demos](https://github.com/r1b4z01d/VLA/wiki/Recording-Sim-Demos) — MuJoCo teleop capture and the sim grasp aid.
 - [Training & Eval](https://github.com/r1b4z01d/VLA/wiki/Training-and-Eval) — fine-tune SmolVLA (what the Train button runs), train ACT, sim eval, playback, merge / recover.
-- [Web Manager (RobotDisco)](https://github.com/r1b4z01d/VLA/wiki/Web-Manager) — the ten tabs, the CLI / env flags, Docker.
+- [Web Manager (RobotDisco)](https://github.com/r1b4z01d/VLA/wiki/Web-Manager) — the eleven tabs, the CLI / env flags, Docker.
 - [Deploy on Hardware](https://github.com/r1b4z01d/VLA/wiki/Deploy-on-Hardware) — run a policy on the real UR5e (`eval_hw.py`), unattended runs, stages, `vla_action.py`, the route runner and landmark tasks.
 - [8-DOF Hand](https://github.com/r1b4z01d/VLA/wiki/8-DOF-Hand) — per-finger flex + abduct (in progress).
 - [Sync & Layout](https://github.com/r1b4z01d/VLA/wiki/Sync-and-Layout) — how each machine gets the code, and the repo map.

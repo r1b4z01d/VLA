@@ -17,7 +17,7 @@ for the architectural choices as taken.
 - **[Hardware Teleop & Recording](Hardware-Teleop-and-Recording)** — the recording app and its browser page, the camera service and crop, workspace calibration, Stream Deck, save/home/rating/upload, UR faults.
 - **[Recording Sim Demos](Recording-Sim-Demos)** — MuJoCo teleop capture and the sim grasp aid.
 - **[Training & Eval](Training-and-Eval)** — fine-tune SmolVLA (what the Train button runs), train ACT, sim eval, playback, merge/recover.
-- **[Web Manager (RobotDisco)](Web-Manager)** — the browser console, ten tabs: Map (3D/2D, live or simulated) · Routes · Landmarks (+ tasks) · Folks · Services · RobotDisco Teleop · Hand · Datasets · Models (Train button) · Evals grouped by model.
+- **[Web Manager (RobotDisco)](Web-Manager)** — the browser console, eleven tabs: Live (3D/2D, live or simulated) · Maps (SLAM, drawing editor, activate) · Landmarks (+ tasks) · Routes · Folks · Services · VLA Teleop · Hand · Datasets · Models (Train button) · Evals grouped by model.
 - **[Deploy on Hardware](Deploy-on-Hardware)** — run a trained policy on the real UR5e (`eval_hw.py`) with the robot-side inference server; deck / page / keyboard driven, unattended `--auto` runs and stages, `vla_action.py`, the route runner and landmark tasks, the run registry.
 - **[8-DOF Hand](8-DOF-Hand)** — per-finger flex + abduct (in progress).
 - **[Sync & Layout](Sync-and-Layout)** — how each machine gets the code (submodule, `deploy_to_rd.sh --vla`, rsync to the GPU box) and the repo map.

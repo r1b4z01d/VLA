@@ -30,7 +30,7 @@ end for reference.
   `pick_place_loop.py`; called by the rd_ws route runner's `vla:` post-actions, by landmark tasks from
   the manager, and by the robot's voice assistant ("Robot Disco, pick up tigger").
 - **The web manager** — ten tabs: Map (3D + 2D, live or simulated), Routes, Landmarks (+ tasks),
-  Folks, Services (supervisor control, ordered base restart), RobotDisco Teleop, Hand, Datasets,
+  Folks, Services (supervisor control, ordered base restart), VLA Teleop, Hand, Datasets,
   Models, Evals. Runs on the GPU box, the robot and a laptop (`rd_ws/Scripts/dev_stack.sh`).
 - **Simulation** — MuJoCo UR5e + AmazingHand with mink IK and a grasp-aid weld, used by the laptop
   stack and for sim demos; the route editor's `--sim` fabricates the whole mobile robot.

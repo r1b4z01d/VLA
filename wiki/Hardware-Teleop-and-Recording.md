@@ -90,7 +90,7 @@ still works for development.
      --root outputs/datasets/tigger_bed_1 --repo_id local/tigger_bed_1 \
      --task "place tigger in the banana bed" --scene-square 0.75 --side-square 0.75
    ```
-   It prints `[web] open http://192.168.11.80:8090/` — open that, or the manager's **RobotDisco Teleop**
+   It prints `[web] open http://192.168.11.80:8090/` — open that, or the manager's **VLA Teleop**
    tab. Everything printed also lands in `~/rd_ws/VLA/log/manual_panel.log`.
 4. Before a new task, run the **workspace calibration** once (`scripts/calibrate_workspace.py`): it
    powers the arm up, enters freedrive, captures floor / teleop-box / no-go points, survives protective
