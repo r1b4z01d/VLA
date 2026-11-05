@@ -18,8 +18,11 @@ frame, which would make brightness a function of arm pose — a shortcut this po
 
 **Interactive, Stream Deck driven — LAUNCHES PAUSED.** Four keys (a stdin fallback maps the same
 letters if no deck is found):
-- **PLAY / PAUSE** (`p`) — toggle the policy. Paused holds the arm; play (re)starts it and resets the
-  policy so it re-observes from the current pose.
+- **PLAY / PAUSE** (`p`) — toggle the policy. Paused holds the arm. Play first walks the arm to the
+  captured home pose (the same press-and-go return as HOME; any key cancels it and leaves the run
+  paused) and then (re)starts the policy, reset so it re-observes from home — every demo starts there,
+  so a run that starts anywhere else begins out of distribution. `--no-home-start` plays from wherever
+  the arm is.
 - **FREEDRIVE** (`f`) — toggle gravity-comp teach mode so you can hand-guide the arm to a *training*
   start pose. The policy is suspended while freedriving; pressing PLAY exits freedrive and starts.
 - **RESET** (`r`) — reset the policy's internal state and pause (arm holds). Abort a run and start clean.
@@ -35,8 +38,9 @@ run lights the bottom row for a 1-5 star rating; the stars, step count, duration
 served checkpoint go into that run's `eval.json` in webui/evals.py's registry format, so runs show up
 in the manager's Evals tab (each run is also rsynced to the GPU box, the registry's home). Any key other than 1-5 skips the rating.
 
-Typical loop: launch (paused) → FREEDRIVE, position the arm at a training-like start, FREEDRIVE off →
-PLAY → watch → PAUSE → NEW RUN → rate 1-5 → reposition → PLAY … → EXIT. There is NO automatic success metric on
+Typical loop: launch (paused) → PLAY (the arm goes home, then the policy runs) → watch → PAUSE → NEW RUN →
+rate 1-5 → PLAY … → EXIT. FREEDRIVE still hand-guides the arm (to clear a jam, or with `--no-home-start`
+to try a different start pose). There is NO automatic success metric on
 hardware — watch it and judge; `--video` records the scene feed for review. Safety: the `rtde_arm`
 no-go + `max_step` + IK-reachability clamps stay active, so the arm ramps toward targets and can't jump.
 
@@ -339,6 +343,8 @@ def main() -> None:
                          "Mac relay IP if bridging subnets")
     ap.add_argument("--steps", type=int, default=0, help="auto-pause after N played steps (0 = unlimited)")
     ap.add_argument("--fps", type=int, default=12, help="control rate; match the training data")
+    ap.add_argument("--no-home-start", action="store_true",
+                    help="PLAY from wherever the arm is instead of walking it to the captured home pose first")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--task", default="pick up the Home Depot bucket")
     ap.add_argument("--robot-ip", default="192.168.11.21")
@@ -788,7 +794,7 @@ def main() -> None:
         pass
     held: dict = {}                      # live key up/down state (unused: HOME is press-and-go)
     pad, ctrl = _make_control(evq, held)
-    st = {"mode": "paused", "played": 0, "exit": False, "homing": False, "home_steps": 0,
+    st = {"mode": "paused", "played": 0, "exit": False, "homing": False, "home_steps": 0, "home_result": None,
           "rating": False}
 
     def set_mode(m: str) -> None:
@@ -803,12 +809,27 @@ def main() -> None:
             except Exception as e:  # noqa: BLE001
                 print(f"[freedrive] stop failed: {e}")
 
-    def enter_playing() -> None:
-        if st["mode"] == "freedrive":
-            stop_freedrive()
+    def _start_play() -> None:
         reset_policy()          # fresh chunk: re-observe from wherever the arm is now
         st["played"] = 0
         set_mode("playing")
+
+    def enter_playing() -> None:
+        """PLAY. The arm walks to the captured home pose first and the policy starts from there: every
+        demo starts at home, so a run started anywhere else begins out of distribution. The return is the
+        HOME key's press-and-go homing (one servoJ increment per tick, any key cancels) plus a latch that
+        starts the policy the moment home is reached (see the homing branch of the loop). Already at home
+        = one tick. --no-home-start, or no captured home pose, plays from the current pose."""
+        if st["mode"] == "freedrive":
+            stop_freedrive()
+        if args.no_home_start or home_q is None or arm is None or not hasattr(arm, "home_step"):
+            if home_q is None and not args.no_home_start:
+                print(f"[home] no {HOME_PATH} — playing from the current pose", flush=True)
+            _start_play()
+            return
+        st["play_after_home"] = True
+        start_homing()
+        print("[home] going home first — the policy starts when the arm gets there", flush=True)
 
     def toggle_freedrive() -> None:
         if st["mode"] == "freedrive":
@@ -872,7 +893,16 @@ def main() -> None:
     def stop_homing(why: str) -> None:
         if st["homing"]:
             st["homing"] = False
+            st["home_result"] = why
             print(f"[home] {why} after {st['home_steps']} steps")
+
+    def _cancelled_prehome() -> bool:
+        """A key stopped the return that PLAY had started: drop the latch so the policy does not start
+        when a later HOME press reaches home, and stay paused."""
+        if st.pop("play_after_home", False):
+            print("[home] pre-play homing cancelled — paused; PLAY again to retry", flush=True)
+            return True
+        return False
 
     def homing_tick() -> None:
         """One increment toward home. Joint space (servoJ), so no IK/singularity fault."""
@@ -1429,6 +1459,8 @@ def main() -> None:
                         continue
                     if key != KEY_HOME and st["homing"]:
                         stop_homing("interrupted")
+                        if _cancelled_prehome() and key == KEY_PLAY:
+                            continue        # that PLAY was the cancel, not a new go
                     if key == KEY_EXIT:
                         st["exit"] = True
                     elif key == KEY_PLAY:
@@ -1443,7 +1475,11 @@ def main() -> None:
                         close_hand()
                     elif key == KEY_HOME:
                         # press-and-go: a second press is the cancel, since no key is being held
-                        stop_homing("cancelled") if st["homing"] else start_homing()
+                        if st["homing"]:
+                            stop_homing("cancelled")
+                            _cancelled_prehome()
+                        else:
+                            start_homing()
             except queue.Empty:
                 pass
             if st["exit"]:
@@ -1558,6 +1594,14 @@ def main() -> None:
                 # press-and-go: the latch runs to completion on its own. It used to also require the
                 # deck key to still be down, which made this hold-to-home; the key-up check is gone.
                 homing_tick()
+                if not st["homing"] and st.pop("play_after_home", False):
+                    # PLAY's return finished: start the policy from home, or not at all
+                    if st["home_result"] == "reached home":
+                        _start_play()
+                    elif args.auto:
+                        auto_abort(f"could not reach home before the run: {st['home_result']}")
+                    else:
+                        print(f"[home] {st['home_result']} — not starting; PLAY again to retry", flush=True)
                 if auto["phase"] == "homing" and not st["homing"]:
                     auto["phase"] = None
                     print("[auto] home", flush=True)

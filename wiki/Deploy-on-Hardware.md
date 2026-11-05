@@ -20,10 +20,12 @@ locks the camera **exposure** (`--expose-manual` to trim on the deck, `--no-expo
 **crop the checkpoint was trained with** (from the served `capture` info; `--scene-square` / `--side-square`
 override) and starts PAUSED. The deck, the keyboard and the browser page send the same events:
 
-- **PLAY / PAUSE** (`p`) — toggle the policy. Paused holds the arm; play (re)starts and resets the
-  policy so it re-observes from the current pose. Key is **green** paused, **red** while the arm is live.
-- **FREEDRIVE** (`f`) — gravity-comp teach mode: hand-guide the arm to a **training** start pose (policy
-  suspended). Pressing PLAY exits freedrive and starts.
+- **PLAY / PAUSE** (`p`) — toggle the policy. Paused holds the arm. Play first walks the arm to the
+  captured home pose (the HOME return; any key cancels it and leaves the run paused), then (re)starts and
+  resets the policy so it re-observes from home — every demo starts there. `--no-home-start` plays from
+  wherever the arm is. Key is **green** paused, **red** while the arm is live.
+- **FREEDRIVE** (`f`) — gravity-comp teach mode: hand-guide the arm (policy suspended), e.g. to clear a
+  jam. Pressing PLAY exits freedrive, homes and starts.
 - **RESET** (`r`) — reset the policy's internal state and pause (arm holds). Abort a run and start clean.
 - **HOME** (`h`) — press-and-go slow joint-space return to the captured home pose (second press cancels).
 - **✊ CLOSE hand** (`c`; deck row 3 first key, the same place and icon as the teleop panel's; the
@@ -159,8 +161,8 @@ observation, then 100 blind actions (~8 s at 12 fps). For a contact-rich pick th
 `--temporal-ensemble 0.01` re-observes **every step** (ALOHA-style blending); `--n-action-steps 8`
 re-observes every 8. Both are inference-time only — **no retraining**.
 
-Typical loop: launch (paused) → **FREEDRIVE** to a training-like start → **FREEDRIVE off** → **PLAY** →
-watch → **PAUSE** / reposition / **PLAY** → **EXIT**. `--fps` **must match the training data** (12 here);
+Typical loop: launch (paused) → **PLAY** (the arm goes home, then the policy runs) → watch → **PAUSE** →
+**NEW RUN** / **PLAY** → **EXIT**. `--fps` **must match the training data** (12 here);
 `--device cpu` by default (ACT is small, CPU keeps up at 12 fps; the Jetson has CUDA if you want `--device cuda`); `--video`
 writes `rollout.mp4` into the run directory (the played segments); `--steps N` auto-pauses after N played steps (0 =
 unlimited); `--task` is cosmetic for ACT (no language encoder). There is **no automatic success metric**
@@ -180,6 +182,6 @@ FREEDRIVE, RESET, ⌂ HOME, NEW RUN, 🖐 open, ✊ close, EXIT and the 1-5 rati
 key events, so the deck, the keyboard and the page are interchangeable. The cards are Exposure, Model (the
 served checkpoint, reactivity flags and crop), Run (steps, step/inference timing, the stars), Runs this
 session and Arm; every console line also lands in the page's log. `--ui none` disables it. The manager's
-**RobotDisco Teleop** tab embeds this page whenever `vla_eval` is up.
+**VLA Teleop** tab embeds this page whenever `vla_eval` is up.
 
 <!-- TODO screenshot: robot-page-eval.png — http://192.168.11.80:8090/ in eval mode (robot only, not yet captured) -->
