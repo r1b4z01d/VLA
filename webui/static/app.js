@@ -1297,6 +1297,16 @@ function mapsRender(d) {
     ...(d.source === "sim" ? [el("span", { class: "tag warn" }, "sim")] : [mapsUnitBadge(units, "robot_disco_slam", "SLAM", true), " ", mapsUnitBadge(units, "robot_disco_localization", "localization", false), " ", mapsUnitBadge(units, "robot_disco_navigation", "navigation", false)]));
   st.className = "mono ok";
   $("#btn-maps-new").disabled = !!d.mapping || (d.job && d.job.running);
+  // "seed from pose": what Edit via SLAM would resume at. Only meaningful for the ACTIVE map — a pose
+  // from AMCL is in that map's frame and says nothing about where the robot is in any other map.
+  const seedBox = $("#maps-seed"), seedLbl = $("#maps-seed-label"), seedTxt = $("#maps-seed-pose");
+  const p = d.pose;
+  seedTxt.textContent = p ? `${p.x.toFixed(2)}, ${p.y.toFixed(2)} @ ${(p.yaw * 180 / Math.PI).toFixed(0)}°` : "no pose";
+  seedLbl.classList.toggle("off", !p);
+  seedBox.disabled = !p;
+  seedLbl.title = p
+    ? `Edit via SLAM on the ACTIVE map resumes at ${p.x.toFixed(2)}, ${p.y.toFixed(2)} @ ${(p.yaw * 180 / Math.PI).toFixed(0)}° instead of the posegraph's dock. Any other map resumes at its dock whatever this says.`
+    : "no live map->base_footprint: localization is not running or has no fix, so SLAM can only resume at the map's dock";
   const slam = $("#maps-slam"), req = (d.slam && d.slam.request) || {};
   if (d.mapping) {
     slam.hidden = false;
@@ -1333,9 +1343,22 @@ $("#btn-maps-new").onclick = () => {
 $("#maps-newname").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-maps-new").click(); });
 async function mapSlamStart(mode, name) {
   const what = mode === "continue" ? `Re-map ${name} with SLAM?` : `Start a new map named ${name}?`;
-  if (!confirm(`${what}\n\nLocalization stops and slam_toolbox starts; the robot will not navigate until a map is activated again. Drive it around by hand, then Save and Stop.`)) return;
-  try { const d = await post("/api/maps/slam/start", { mode, name }); ok(`SLAM started (${mode}): ${(d.units || []).join(", ") || "editor only"}`); $("#maps-newname").value = ""; }
-  catch (e) { return err(e); }
+  const seed = $("#maps-seed").checked && !$("#maps-seed").disabled;
+  let where = "";
+  if (mode === "continue") {
+    const p = mapsData && mapsData.pose, active = mapsData && mapsData.active === name;
+    where = seed && p && active
+      ? `\n\nMapping resumes at the robot's pose: ${p.x.toFixed(2)}, ${p.y.toFixed(2)} @ ${(p.yaw * 180 / Math.PI).toFixed(0)}°.`
+      : `\n\nMapping resumes at the map's DOCK (where the original run started), because ${!seed ? "\u201cseed from pose\u201d is off" : !active ? name + " is not the active map" : "there is no live pose"}. Park the robot there first, or the new scans will merge in at an offset.`;
+  }
+  if (!confirm(`${what}${where}\n\nLocalization stops and slam_toolbox starts; the robot will not navigate until a map is activated again. Drive it around by hand, then Save and Stop.`)) return;
+  try {
+    const d = await post("/api/maps/slam/start", { mode, name, seed_pose: seed });
+    const s = d.seed || {};
+    const how = s.seeded ? `from ${s.pose.map((v, i) => i === 2 ? (v * 180 / Math.PI).toFixed(0) + "\u00b0" : v.toFixed(2)).join(", ")}` : mode === "continue" ? `from the dock (${s.why})` : "";
+    ok(`SLAM started (${mode}) ${how}: ${(d.units || []).join(", ") || "editor only"}`);
+    $("#maps-newname").value = "";
+  } catch (e) { return err(e); }
   mapsRefresh();
 }
 async function mapSlamSave() {

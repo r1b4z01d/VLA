@@ -215,7 +215,7 @@
           <input id="route-url" class="robot-url mono" placeholder="http://192.168.11.80:8092/" title="route editor URL (Enter to apply)">
           <a id="route-open" class="muted" href="#" target="_blank" title="open the editor in its own tab">↗</a>
         </div>
-        <iframe id="route-frame" class="robot-frame" title="route editor" allow="fullscreen"></iframe>
+        <iframe id="route-frame" class="robot-frame" title="route editor" allow="fullscreen; gamepad"></iframe>
         <div id="route-hint" class="robot-hint muted" hidden>
           The route editor is not answering. It is the supervisor unit <b>robot_disco_route_editor</b> on the robot PC
           (<a href="http://192.168.11.80:9999/" target="_blank">http://192.168.11.80:9999/</a>, or <code>sudo supervisorctl start robot_disco_route_editor</code>),
@@ -247,6 +247,10 @@
           <h2>Maps</h2>
           <div class="row-actions">
             <span id="maps-status" class="mono muted">—</span>
+            <label id="maps-seed-label" class="maps-seed" title="Edit via SLAM: resume the map where the robot stands now (AMCL's fix) instead of at the spot the original mapping run started from">
+              <input type="checkbox" id="maps-seed" checked> seed from pose
+              <span id="maps-seed-pose" class="mono muted"></span>
+            </label>
             <input id="maps-newname" class="robot-url" placeholder="new map name" maxlength="40" title="name for a new map">
             <button id="btn-maps-new" class="btn primary" disabled title="start slam_toolbox on a fresh map; drive the robot around; then save">+ New map (SLAM)</button>
             <button id="btn-maps-refresh" class="btn" title="reload">↻</button>
@@ -285,7 +289,7 @@
           <span id="map-status" class="mono muted">—</span>
           <a id="map-open" class="muted" href="#" target="_blank" title="open in its own tab">↗</a>
         </div>
-        <iframe id="map-frame" class="robot-frame" title="map" allow="fullscreen"></iframe>
+        <iframe id="map-frame" class="robot-frame" title="map" allow="fullscreen; gamepad"></iframe>
         <div id="actlog" class="actlog collapsed">
           <div class="actlog-bar">
             <button id="actlog-toggle" class="btn icon" title="show / hide the activity log">▸</button>

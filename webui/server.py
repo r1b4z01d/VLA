@@ -1080,6 +1080,7 @@ def api_map_png(name: str):
 class SlamBody(BaseModel):
     mode: "str | None" = None       # new | continue
     name: "str | None" = None
+    seed_pose: bool = True          # continue: resume at the robot's current pose, not the posegraph's dock
 
 
 @app.post("/api/maps/slam/start")
@@ -1087,7 +1088,11 @@ def api_maps_slam_start(body: SlamBody):
     """Start mapping: a fresh map (mode new) or continue an existing map's posegraph. The editor records
     the request for the SLAM launch; localization (AMCL) must stop (both own map -> odom), then the
     SLAM unit starts. Drive the robot around; the Live tab shows the map grow."""
-    d = _editor_json("POST", "api/maps/slam/start", {"mode": body.mode or "new", "name": body.name or ""}, timeout=6.0)
+    # The seed is resolved editor-side BEFORE localization is stopped below — once AMCL is down there
+    # is no map->base_footprint left to read the robot's position from.
+    d = _editor_json("POST", "api/maps/slam/start",
+                     {"mode": body.mode or "new", "name": body.name or "", "seed_pose": body.seed_pose},
+                     timeout=6.0)
     log: list = []
     if MAP_SOURCE != "sim":
         states = _unit_states()
